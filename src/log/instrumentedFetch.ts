@@ -62,7 +62,8 @@ function extractRequestBody(init?: RequestInit): string | undefined {
 
 /**
  * Wrap a fetch implementation so every call logs a req + resp entry.
- * Clones the Response to read the body preview without consuming the caller's stream.
+ * Reads the response body once, then returns a fresh Response with the same status/headers
+ * so the caller gets a clean read (avoids Response.clone() polyfill races on RN whatwg-fetch).
  * Best-effort redaction: header keys matching /signature|auth|cookie/i and top-level
  * body keys `visitor_data` / `visitorData` are replaced with `<redacted>` in the preview.
  */
@@ -113,11 +114,11 @@ export function makeInstrumentedFetch(
 
     const response = await baseFetch(input as RequestInfo, init);
 
+    let respText = '';
     let respPreview: string | undefined;
     try {
-      const clone = response.clone();
-      const text = await clone.text();
-      respPreview = previewBody(text, RESP_BODY_PREVIEW_MAX).preview;
+      respText = await response.text();
+      respPreview = previewBody(respText, RESP_BODY_PREVIEW_MAX).preview;
     } catch {
       respPreview = '<unreadable>';
     }
@@ -130,6 +131,10 @@ export function makeInstrumentedFetch(
       bodyPreview: respPreview,
     });
 
-    return response;
+    return new Response(respText, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   };
 }
