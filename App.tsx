@@ -10,6 +10,8 @@ import {
   View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
 
 import { parseVideoId } from './src/util/videoId';
 import { fetchTranscript, transcriptToText, TranscriptLine } from './src/scrape/youtubeiClient';
@@ -17,6 +19,22 @@ import { postTranscript } from './src/backend/api';
 import { useBreadcrumbLog } from './src/log/breadcrumbs';
 import { useNetworkLog } from './src/log/networkLog';
 import { makeInstrumentedFetch } from './src/log/instrumentedFetch';
+import { composeShareLog } from './src/log/shareLog';
+
+const APP_VERSION = '1.0.4';
+
+/**
+ * Fixed diagnostic fixtures for the on-device test harness (s157).
+ * The 3 IDs cover the caption-class matrix Marcelo needs classified:
+ *   - ASR-only (no manual tracks)
+ *   - Multi-track with manual EN
+ *   - Unknown (probe)
+ */
+const TEST_VIDEOS = [
+  { id: 'FaDDitH2WtU', label: 'FaDDitH2WtU (ASR-only, philosophy)' },
+  { id: 'dQw4w9WgXcQ', label: 'dQw4w9WgXcQ (music, 6 tracks incl manual EN)' },
+  { id: '7-ex2qeAkdc', label: '7-ex2qeAkdc (unknown class)' },
+];
 
 export default function App() {
   const [urlInput, setUrlInput] = useState('');
@@ -25,6 +43,10 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [isWorking, setIsWorking] = useState(false);
   const [uploadOk, setUploadOk] = useState(false);
+  /** Tracks the last run context so the shared log header can label it. */
+  const [lastRunContext, setLastRunContext] = useState<string>('none');
+  /** Silent log-only state for share failures (no UI banner). */
+  const [shareError, setShareError] = useState<string | null>(null);
   const breadcrumbs = useBreadcrumbLog();
   const netLog = useNetworkLog();
   const instrumentedFetch = useMemo(() => makeInstrumentedFetch(netLog.push), [netLog.push]);
@@ -43,6 +65,7 @@ export default function App() {
       return;
     }
 
+    setLastRunContext(videoId);
     setIsWorking(true);
     try {
       breadcrumbs.push('starting_stub_upload');
@@ -70,14 +93,86 @@ export default function App() {
     }
   };
 
-  const onShareLog = async () => {
-    const message = [
-      ...breadcrumbs.formattedLines,
-      '---network---',
-      ...netLog.formattedLines,
-    ].join('\n');
+  /**
+   * s157 diagnostic harness: run fetchTranscript against the 3 fixed IDs
+   * back-to-back, appending divider + result breadcrumbs so a single share
+   * captures the full caption-class matrix. Errors are logged, not thrown --
+   * the sweep completes even when one video fails.
+   */
+  const onTestAll3 = async () => {
+    setError(null);
+    setUploadOk(false);
+    setLines([]);
+    setTitle(null);
+    breadcrumbs.reset();
+    netLog.reset();
+    setLastRunContext('test all');
+    setIsWorking(true);
+
+    let okCount = 0;
     try {
-      await Share.share({ message });
+      for (const video of TEST_VIDEOS) {
+        breadcrumbs.push(`--- test: ${video.id} ---`);
+        try {
+          const result = await fetchTranscript(
+            video.id,
+            breadcrumbs.push,
+            instrumentedFetch
+          );
+          breadcrumbs.push(`TEST_RESULT: ${video.id} = OK segments=${result.lines.length}`);
+          okCount += 1;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          const truncated = message.slice(0, 80);
+          breadcrumbs.push(`TEST_RESULT: ${video.id} = FAIL ${truncated}`);
+          // Do NOT rethrow -- keep sweeping the remaining IDs.
+        }
+      }
+      breadcrumbs.push(`--- test all: done ${okCount}/${TEST_VIDEOS.length} ---`);
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  /**
+   * File-based share (s157). Marcelo hit TG truncation on inline `Share.share`
+   * (msg 6829). Write the combined breadcrumb + network log to a temp file and
+   * hand the URI to expo-sharing so target apps receive an attachment, not
+   * chat text. Falls back to inline `Share.share` when `Sharing.isAvailableAsync`
+   * returns false (older platforms / no share sheet).
+   */
+  const onShareLog = async () => {
+    setShareError(null);
+    const composed = composeShareLog({
+      appVersion: APP_VERSION,
+      context: lastRunContext,
+      atMs: Date.now(),
+      breadcrumbLines: breadcrumbs.formattedLines,
+      networkLines: netLog.formattedLines,
+    });
+
+    try {
+      const canShareFile = await Sharing.isAvailableAsync();
+      const baseDir = FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
+      if (canShareFile && baseDir) {
+        const fileUri = `${baseDir}yt-log-${Date.now()}.txt`;
+        await FileSystem.writeAsStringAsync(fileUri, composed);
+        await Sharing.shareAsync(fileUri, {
+          mimeType: 'text/plain',
+          dialogTitle: 'Share log',
+        });
+        return;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setShareError(`file-share failed: ${message.slice(0, 80)}`);
+      // Fall through to inline-Share fallback below.
+    }
+
+    // Fallback: inline text share (old code path). Kept for platforms where
+    // expo-sharing is unavailable.
+    try {
+      await Share.share({ message: composed });
     } catch {
       // Share sheet dismissed / unavailable -- no-op.
     }
@@ -110,6 +205,14 @@ export default function App() {
         ) : (
           <Text style={styles.buttonText}>Extract</Text>
         )}
+      </Pressable>
+
+      <Pressable
+        style={[styles.testButton, isWorking && styles.buttonDisabled]}
+        onPress={onTestAll3}
+        disabled={isWorking}
+      >
+        <Text style={styles.testButtonText}>Test All 3</Text>
       </Pressable>
 
       {error && <Text style={styles.error}>{error}</Text>}
@@ -145,6 +248,8 @@ export default function App() {
           <Text style={styles.shareButtonText}>Share log</Text>
         </Pressable>
       )}
+
+      {shareError && <Text style={styles.shareErrorText}>{shareError}</Text>}
 
       {title && <Text style={styles.videoTitle}>{title}</Text>}
 
@@ -183,7 +288,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 12,
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 8,
   },
   buttonDisabled: {
     opacity: 0.6,
@@ -191,6 +296,20 @@ const styles = StyleSheet.create({
   buttonText: {
     color: '#fff',
     fontWeight: '600',
+  },
+  testButton: {
+    backgroundColor: '#e8f0fe',
+    borderColor: '#1a73e8',
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 10,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  testButtonText: {
+    color: '#1a73e8',
+    fontWeight: '600',
+    fontSize: 13,
   },
   error: {
     color: '#c00',
@@ -236,6 +355,11 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 13,
     fontWeight: '500',
+  },
+  shareErrorText: {
+    color: '#888',
+    fontSize: 11,
+    marginBottom: 8,
   },
   videoTitle: {
     fontSize: 16,
