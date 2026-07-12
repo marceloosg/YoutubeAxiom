@@ -2,7 +2,7 @@
 // `fs`-dependent platform bindings that crash the RN/Metro bundler. Do not
 // import from 'youtubei.js' (root) or 'youtubei.js/node'.
 import { Innertube } from 'youtubei.js/web';
-import { mapSegments, transcriptToText, TranscriptLine } from './segmentMap';
+import { mapSegments, parseTimedtextSrv1, transcriptToText, TranscriptLine } from './segmentMap';
 
 export type { TranscriptLine };
 export { transcriptToText };
@@ -59,22 +59,90 @@ export async function fetchTranscript(
   const info = await youtube.getInfo(videoId);
   onBreadcrumb('info_fetched');
 
-  const transcriptInfo = await info.getTranscript();
-  onBreadcrumb('transcript_fetched');
+  // Guard against get_transcript's HTTP 400 (see s157 root cause). YouTube
+  // returns 400 whenever the info response lacks transcript-panel params.
+  // Two real cases (both reproduced on this box against v17.2.0):
+  //   1. Zero captions (FaDDitH2WtU: info.captions == null, has_transcript == false).
+  //   2. Has captions but no transcript panel (dQw4w9WgXcQ: 6 caption_tracks,
+  //      has_transcript == false).
+  // The signed `caption_tracks[i].base_url` returns the caption XML directly,
+  // so case 2 falls back to a direct timedtext fetch through the same custom
+  // fetch (keeps the debug network log intact).
+  const captionsAny = (info as unknown as {
+    captions?: { caption_tracks?: Array<{
+      base_url?: string;
+      language_code?: string;
+      kind?: string;
+    }> };
+    has_transcript?: boolean;
+  }).captions;
+  const captionTracks = captionsAny?.caption_tracks ?? [];
+  const hasTranscript = (info as unknown as { has_transcript?: boolean }).has_transcript === true;
 
-  const initialSegments = transcriptInfo.transcript?.content?.body?.initial_segments ?? [];
-  if (initialSegments.length === 0) {
+  if (captionTracks.length === 0 && !hasTranscript) {
     onBreadcrumb('no_captions_found');
     throw new Error('No captions available for this video.');
   }
 
-  const lines = mapSegments(initialSegments as unknown as ReadonlyArray<{
-    type?: string;
-    start_ms?: string;
-    end_ms?: string;
-    snippet?: { text?: string; toString?: () => string };
-  }>);
-  onBreadcrumb('segments_mapped');
+  let lines: TranscriptLine[];
+  try {
+    const transcriptInfo = await info.getTranscript();
+    onBreadcrumb('transcript_fetched');
+
+    const initialSegments = transcriptInfo.transcript?.content?.body?.initial_segments ?? [];
+    if (initialSegments.length === 0) {
+      onBreadcrumb('no_captions_found');
+      throw new Error('No captions available for this video.');
+    }
+
+    lines = mapSegments(initialSegments as unknown as ReadonlyArray<{
+      type?: string;
+      start_ms?: string;
+      end_ms?: string;
+      snippet?: { text?: string; toString?: () => string };
+    }>);
+    onBreadcrumb('segments_mapped');
+  } catch (err) {
+    // Only fall back when caption_tracks exist -- otherwise there's nothing to
+    // fetch and the raw 400 error is just noise. Mask it as the same
+    // user-facing "no captions" message the pre-check emits.
+    if (captionTracks.length === 0) {
+      onBreadcrumb('no_captions_found');
+      throw new Error('No captions available for this video.');
+    }
+
+    onBreadcrumb('transcript_fetch_fallback');
+    // Prefer manual English → any English → first track. Manual English is
+    // higher quality than ASR ("auto-generated speech recognition").
+    const track =
+      captionTracks.find((t) => t.language_code === 'en' && t.kind !== 'asr') ??
+      captionTracks.find((t) => t.language_code === 'en') ??
+      captionTracks[0];
+
+    const baseUrl = track?.base_url;
+    if (!baseUrl) {
+      // Track record with no base_url is a caption-shape violation from
+      // youtubei.js; treat as unrecoverable and rethrow the original error.
+      throw err;
+    }
+
+    const url = baseUrl.includes('fmt=') ? baseUrl : baseUrl + '&fmt=srv1';
+    // Use the caller-supplied fetch when present so the debug network log
+    // records the timedtext GET; otherwise fall through to global fetch.
+    const fetchImpl: typeof fetch = customFetch ?? fetch;
+    const resp = await fetchImpl(url);
+    if (!resp.ok) {
+      throw new Error(`timedtext fetch failed: ${resp.status}`);
+    }
+    const xml = await resp.text();
+    lines = parseTimedtextSrv1(xml);
+    if (lines.length === 0) {
+      onBreadcrumb('no_captions_found');
+      throw new Error('No captions available for this video.');
+    }
+    onBreadcrumb('transcript_fetched');
+    onBreadcrumb('segments_mapped');
+  }
 
   return {
     videoId,
