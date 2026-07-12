@@ -17,7 +17,18 @@ export interface TranscriptResult {
 
 let innertubeSingleton: Innertube | null = null;
 
-async function getInnertube(): Promise<Innertube> {
+async function getInnertube(customFetch?: typeof fetch): Promise<Innertube> {
+  // A caller-supplied fetch is only used in debug flows and must not poison the
+  // shared singleton (would break subsequent default-fetch UI calls). Rebuild a
+  // fresh Innertube for those; default path keeps the cached singleton.
+  if (customFetch) {
+    return Innertube.create({
+      lang: 'en',
+      location: 'US',
+      retrieve_player: true,
+      fetch: customFetch,
+    });
+  }
   if (innertubeSingleton) return innertubeSingleton;
   innertubeSingleton = await Innertube.create({
     lang: 'en',
@@ -31,14 +42,18 @@ async function getInnertube(): Promise<Innertube> {
  * Fetches a video's transcript via youtubei.js. `onBreadcrumb` is called at each
  * stage transition -- mirrors the Kotlin ScrapeLogFile breadcrumb design so the UI
  * can render a log-over-progress-bar view instead of a spinner.
+ *
+ * `customFetch` (optional) wraps the underlying InnerTube HTTP call; used by the
+ * in-app network log for debug. When present, the singleton is bypassed.
  */
 export async function fetchTranscript(
   videoId: string,
-  onBreadcrumb: Breadcrumb = () => {}
+  onBreadcrumb: Breadcrumb = () => {},
+  customFetch?: typeof fetch
 ): Promise<TranscriptResult> {
   onBreadcrumb('starting_scrape');
 
-  const youtube = await getInnertube();
+  const youtube = await getInnertube(customFetch);
   onBreadcrumb('primary_start');
 
   const info = await youtube.getInfo(videoId);

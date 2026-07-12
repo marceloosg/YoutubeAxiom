@@ -23,7 +23,10 @@ function getBackendUrl(): string {
  * the raw JSON body, hex-encoded, carried in the `X-Axiom-Signature` header.
  * Handled server-side by `telegram_inbound_lambda.py:handle_yt_transcript_post`.
  */
-export async function postTranscript(body: TranscriptPostBody): Promise<Response> {
+export async function postTranscript(
+  body: TranscriptPostBody,
+  customFetch?: typeof fetch
+): Promise<Response> {
   const secret = await loadSecret();
   if (!secret) {
     throw new Error(
@@ -36,7 +39,8 @@ export async function postTranscript(body: TranscriptPostBody): Promise<Response
   const jsonBody = JSON.stringify(body);
   const signature = signBody(secret, jsonBody);
 
-  const response = await fetch(`${backendUrl.replace(/\/$/, '')}/yt-transcript`, {
+  const doFetch = customFetch ?? globalThis.fetch;
+  const response = await doFetch(`${backendUrl.replace(/\/$/, '')}/yt-transcript`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
