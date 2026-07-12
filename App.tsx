@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -14,6 +15,8 @@ import { parseVideoId } from './src/util/videoId';
 import { fetchTranscript, transcriptToText, TranscriptLine } from './src/scrape/youtubeiClient';
 import { postTranscript } from './src/backend/api';
 import { useBreadcrumbLog } from './src/log/breadcrumbs';
+import { useNetworkLog } from './src/log/networkLog';
+import { makeInstrumentedFetch } from './src/log/instrumentedFetch';
 
 export default function App() {
   const [urlInput, setUrlInput] = useState('');
@@ -23,6 +26,8 @@ export default function App() {
   const [isWorking, setIsWorking] = useState(false);
   const [uploadOk, setUploadOk] = useState(false);
   const breadcrumbs = useBreadcrumbLog();
+  const netLog = useNetworkLog();
+  const instrumentedFetch = useMemo(() => makeInstrumentedFetch(netLog.push), [netLog.push]);
 
   const onExtract = async () => {
     setError(null);
@@ -30,6 +35,7 @@ export default function App() {
     setLines([]);
     setTitle(null);
     breadcrumbs.reset();
+    netLog.reset();
 
     const videoId = parseVideoId(urlInput);
     if (!videoId) {
@@ -40,16 +46,19 @@ export default function App() {
     setIsWorking(true);
     try {
       breadcrumbs.push('starting_stub_upload');
-      const result = await fetchTranscript(videoId, breadcrumbs.push);
+      const result = await fetchTranscript(videoId, breadcrumbs.push, instrumentedFetch);
       setLines(result.lines);
       setTitle(result.title);
 
       breadcrumbs.push('posting');
-      await postTranscript({
-        video_id: result.videoId,
-        transcript_text: transcriptToText(result.lines),
-        breadcrumbs: breadcrumbs.formattedLines,
-      });
+      await postTranscript(
+        {
+          video_id: result.videoId,
+          transcript_text: transcriptToText(result.lines),
+          breadcrumbs: breadcrumbs.formattedLines,
+        },
+        instrumentedFetch
+      );
       breadcrumbs.push('backend_status:ok');
       setUploadOk(true);
     } catch (err) {
@@ -60,6 +69,22 @@ export default function App() {
       setIsWorking(false);
     }
   };
+
+  const onShareLog = async () => {
+    const message = [
+      ...breadcrumbs.formattedLines,
+      '---network---',
+      ...netLog.formattedLines,
+    ].join('\n');
+    try {
+      await Share.share({ message });
+    } catch {
+      // Share sheet dismissed / unavailable -- no-op.
+    }
+  };
+
+  const hasAnyLog =
+    breadcrumbs.formattedLines.length > 0 || netLog.formattedLines.length > 0;
 
   return (
     <View style={styles.container}>
@@ -100,6 +125,25 @@ export default function App() {
             ))}
           </ScrollView>
         </View>
+      )}
+
+      {netLog.formattedLines.length > 0 && (
+        <View style={styles.netLogBox}>
+          <Text style={styles.logHeading}>Network</Text>
+          <ScrollView>
+            {netLog.formattedLines.map((line, idx) => (
+              <Text key={idx} style={styles.logLine}>
+                {line}
+              </Text>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {hasAnyLog && (
+        <Pressable style={styles.shareButton} onPress={onShareLog}>
+          <Text style={styles.shareButtonText}>Share log</Text>
+        </Pressable>
       )}
 
       {title && <Text style={styles.videoTitle}>{title}</Text>}
@@ -163,10 +207,35 @@ const styles = StyleSheet.create({
     padding: 8,
     marginBottom: 12,
   },
+  netLogBox: {
+    maxHeight: 200,
+    backgroundColor: '#f2f2f2',
+    borderRadius: 8,
+    padding: 8,
+    marginBottom: 12,
+  },
+  logHeading: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 4,
+  },
   logLine: {
     fontSize: 11,
     fontFamily: 'monospace',
     color: '#555',
+  },
+  shareButton: {
+    backgroundColor: '#666',
+    borderRadius: 8,
+    padding: 8,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  shareButtonText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '500',
   },
   videoTitle: {
     fontSize: 16,
