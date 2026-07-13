@@ -45,32 +45,100 @@ async function getInnertube(customFetch?: typeof fetch): Promise<Innertube> {
   return innertubeSingleton;
 }
 
+// Retry-tier client types, in fallback order. NOTE: youtubei.js's real
+// ClientType export (v17.2.0, node_modules/youtubei.js/dist/src/core/Session.js)
+// has no `TVHTML5` key -- the TV client lives at `ClientType.TV` (value
+// `"TVHTML5"`) and `ClientType.IOS` has value `"iOS"` (not `"IOS"`). Reference
+// the enum members directly rather than string literals so a future youtubei.js
+// bump that renames a value doesn't silently pass `client_type: undefined`.
+export type RetryClientType =
+  | typeof ClientType.ANDROID
+  | typeof ClientType.IOS
+  | typeof ClientType.TV;
+
 /**
- * Fetches ANDROID-client caption_tracks for `videoId`. The WEB client's signed
- * timedtext URLs went pot-gated in 2025 -- signature validates (200) but the
- * body is empty. ANDROID uses a separate signing path that (so far) does not
- * require pot, so we build a second Innertube against ClientType.ANDROID and
- * re-fetch info to pick a working track.
+ * Diagnostic label + entry breadcrumb per retry tier, keyed by the
+ * `ClientType` value (not the enum key name, since `ClientType.TV`'s value is
+ * `"TVHTML5"`). Machine-greppable strings so on-device logs immediately show
+ * which tier had caption_tracks available: `android_tracks=N`, `ios_tracks=N`,
+ * `tvhtml5_tracks=N`.
+ */
+const RETRY_TIER_META: Record<string, { enterBreadcrumb: string; tracksLabel: string }> = {
+  [ClientType.ANDROID]: { enterBreadcrumb: 'timedtext_empty_retry_android', tracksLabel: 'android_tracks' },
+  [ClientType.IOS]: { enterBreadcrumb: 'timedtext_empty_retry_ios', tracksLabel: 'ios_tracks' },
+  [ClientType.TV]: { enterBreadcrumb: 'timedtext_empty_retry_tvhtml5', tracksLabel: 'tvhtml5_tracks' },
+};
+
+/** Ordered fallback chain: WEB (primary, handled by the caller) -> ANDROID -> IOS -> TV. */
+const RETRY_CLIENT_ORDER: RetryClientType[] = [ClientType.ANDROID, ClientType.IOS, ClientType.TV];
+
+const NO_CAPTIONS_MESSAGE = 'No captions available for this video.';
+
+function noCaptionsError(): Error {
+  return new Error(NO_CAPTIONS_MESSAGE);
+}
+
+/**
+ * Fetches caption_tracks for `videoId` via an alternate Innertube client
+ * (ANDROID / IOS / TV). The WEB client's signed timedtext URLs went pot-gated
+ * in 2025 -- signature validates (200) but the body is empty. Each alternate
+ * client uses a separate signing path that (so far) does not require pot, so
+ * we build a fresh Innertube against the given client_type and re-fetch info
+ * to pick a working track.
  *
  * Always builds a fresh instance (not shared with the WEB singleton) since
  * client_type is baked into session context.
  */
-async function getAndroidCaptionTracks(
+async function getClientCaptionTracks(
+  clientType: RetryClientType,
   videoId: string,
   customFetch?: typeof fetch
 ): Promise<CaptionTrackLike[]> {
-  const androidYt = await Innertube.create({
-    client_type: ClientType.ANDROID,
+  const clientYt = await Innertube.create({
+    client_type: clientType,
     lang: 'en',
     location: 'US',
     retrieve_player: true,
     ...(customFetch ? { fetch: customFetch } : {}),
   });
-  const androidInfo = await androidYt.getInfo(videoId);
-  const androidCaptions = (androidInfo as unknown as {
+  const clientInfo = await clientYt.getInfo(videoId);
+  const clientCaptions = (clientInfo as unknown as {
     captions?: { caption_tracks?: CaptionTrackLike[] };
   }).captions;
-  return androidCaptions?.caption_tracks ?? [];
+  return clientCaptions?.caption_tracks ?? [];
+}
+
+/**
+ * Retries the timedtext fetch through a single alternate Innertube client
+ * tier (ANDROID, IOS, TV/TVHTML5). Emits a `<client>_tracks=N` breadcrumb
+ * right after `getInfo` so on-device logs surface which tier had
+ * caption_tracks available -- tightens future diagnostics without another
+ * ship cycle. Throws the standard NO_CAPTIONS sentinel message whenever this
+ * tier has nothing usable (empty tracks, no base_url, or empty srv1 body);
+ * callers chain tiers by catching this and moving to the next one.
+ */
+async function retryViaClient(
+  clientType: RetryClientType,
+  videoId: string,
+  fetchImpl: typeof fetch,
+  onBreadcrumb: Breadcrumb,
+  customFetch?: typeof fetch
+): Promise<TranscriptLine[]> {
+  const meta = RETRY_TIER_META[clientType];
+  const tracks = await getClientCaptionTracks(clientType, videoId, customFetch);
+  onBreadcrumb(`${meta.tracksLabel}=${tracks.length}`);
+
+  const track = pickCaptionTrack(tracks);
+  const baseUrl = track?.base_url;
+  if (!baseUrl) {
+    throw noCaptionsError();
+  }
+
+  const lines = await fetchTimedtextLines(baseUrl, fetchImpl);
+  if (lines.length === 0) {
+    throw noCaptionsError();
+  }
+  return lines;
 }
 
 /**
@@ -163,34 +231,30 @@ export async function fetchTranscript(
     if (lines.length === 0) {
       // WEB srv1 200-with-empty-body: signature valid, but pot ("proof of
       // origin token") is missing on YouTube's 2025 signed caption URLs.
-      // Retry via ANDROID Innertube: its caption_tracks are signed on a path
-      // that does not (yet) require pot. If ANDROID also comes back empty or
-      // errors, surface the standard "no captions" message.
-      onBreadcrumb('timedtext_empty_retry_android');
-      try {
-        const androidTracks = await getAndroidCaptionTracks(videoId, customFetch);
-        const androidTrack = pickCaptionTrack(androidTracks);
-        const androidBaseUrl = androidTrack?.base_url;
-        if (!androidBaseUrl) {
-          onBreadcrumb('no_captions_found');
-          throw new Error('No captions available for this video.');
+      // Chain through the alternate-client tiers in order -- ANDROID -> IOS ->
+      // TV (TVHTML5) -- each on a separate signing path that does not (yet)
+      // require pot. If every tier comes back empty or errors, surface the
+      // standard "no captions" message.
+      let retrievedViaTier = false;
+      for (const clientType of RETRY_CLIENT_ORDER) {
+        const meta = RETRY_TIER_META[clientType];
+        onBreadcrumb(meta.enterBreadcrumb);
+        try {
+          lines = await retryViaClient(clientType, videoId, fetchImpl, onBreadcrumb, customFetch);
+          retrievedViaTier = true;
+          break;
+        } catch {
+          // This tier had nothing usable (empty tracks, no base_url, empty
+          // body, or any other failure -- Innertube.create rejection, fetch
+          // error). Any such failure is masked as "try the next tier"; the
+          // caller only sees the final "no captions" message once every tier
+          // has been exhausted.
         }
+      }
 
-        lines = await fetchTimedtextLines(androidBaseUrl, fetchImpl);
-        if (lines.length === 0) {
-          onBreadcrumb('no_captions_found');
-          throw new Error('No captions available for this video.');
-        }
-      } catch (androidErr) {
-        // Only unwrap when we already surfaced "no captions". Any other error
-        // (fetch failure, Innertube.create rejection, etc.) still counts as
-        // "captions not retrievable" for the user; preserve the message shape.
-        if (androidErr instanceof Error &&
-            androidErr.message === 'No captions available for this video.') {
-          throw androidErr;
-        }
+      if (!retrievedViaTier) {
         onBreadcrumb('no_captions_found');
-        throw new Error('No captions available for this video.');
+        throw new Error(NO_CAPTIONS_MESSAGE);
       }
     }
     onBreadcrumb('transcript_fetched');
