@@ -61,6 +61,49 @@ function decodeEntities(s: string): string {
     .replace(/&nbsp;/g, ' ');
 }
 
+export interface CaptionTrackLike {
+  base_url?: string;
+  language_code?: string;
+  kind?: string;
+}
+
+/**
+ * Selects the best available caption track from a set: manual English wins over
+ * ASR English, English of either flavor wins over any other language, and
+ * anything wins over nothing. Returns `undefined` when the list is empty.
+ *
+ * Split out of youtubeiClient.ts so both the WEB primary and the ANDROID retry
+ * (added s158 for pot-gated empty-body responses) reuse the same policy.
+ */
+export function pickCaptionTrack<T extends CaptionTrackLike>(
+  tracks: ReadonlyArray<T>
+): T | undefined {
+  return (
+    tracks.find((t) => t.language_code === 'en' && t.kind !== 'asr') ??
+    tracks.find((t) => t.language_code === 'en') ??
+    tracks[0]
+  );
+}
+
+/**
+ * Fetches a signed timedtext `base_url`, forces srv1 format if missing, and
+ * parses the XML into TranscriptLine[]. Throws on non-2xx HTTP; returns an
+ * empty array when the body decodes to zero segments (the WEB pot-missing
+ * signature — see s158).
+ */
+export async function fetchTimedtextLines(
+  baseUrl: string,
+  fetchImpl: typeof fetch
+): Promise<TranscriptLine[]> {
+  const url = baseUrl.includes('fmt=') ? baseUrl : baseUrl + '&fmt=srv1';
+  const resp = await fetchImpl(url);
+  if (!resp.ok) {
+    throw new Error(`timedtext fetch failed: ${resp.status}`);
+  }
+  const xml = await resp.text();
+  return parseTimedtextSrv1(xml);
+}
+
 /**
  * Parses YouTube's timedtext srv1 XML payload (fetched from a caption track's
  * signed `base_url`) into TranscriptLine[]. Regex-only -- no XML lib dep.

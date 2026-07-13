@@ -1,4 +1,9 @@
-import { mapSegments, parseTimedtextSrv1 } from '../src/scrape/segmentMap';
+import {
+  fetchTimedtextLines,
+  mapSegments,
+  parseTimedtextSrv1,
+  pickCaptionTrack,
+} from '../src/scrape/segmentMap';
 
 describe('mapSegments', () => {
   it('maps ms fields to seconds and extracts snippet text', () => {
@@ -119,5 +124,93 @@ describe('parseTimedtextSrv1', () => {
     expect(parseTimedtextSrv1(xml)).toEqual([
       { startSec: 1, endSec: 2, text: 'real' },
     ]);
+  });
+});
+
+describe('pickCaptionTrack', () => {
+  it('prefers manual English over ASR English', () => {
+    const tracks = [
+      { language_code: 'en', kind: 'asr', base_url: 'https://yt/asr' },
+      { language_code: 'en', base_url: 'https://yt/manual' },
+      { language_code: 'es', base_url: 'https://yt/es' },
+    ];
+    expect(pickCaptionTrack(tracks)?.base_url).toBe('https://yt/manual');
+  });
+
+  it('falls back to ASR English when no manual English exists', () => {
+    const tracks = [
+      { language_code: 'es', base_url: 'https://yt/es' },
+      { language_code: 'en', kind: 'asr', base_url: 'https://yt/asr' },
+    ];
+    expect(pickCaptionTrack(tracks)?.base_url).toBe('https://yt/asr');
+  });
+
+  it('falls back to first track when no English exists', () => {
+    const tracks = [
+      { language_code: 'pt', base_url: 'https://yt/pt' },
+      { language_code: 'es', base_url: 'https://yt/es' },
+    ];
+    expect(pickCaptionTrack(tracks)?.base_url).toBe('https://yt/pt');
+  });
+
+  it('returns undefined for an empty list', () => {
+    expect(pickCaptionTrack([])).toBeUndefined();
+  });
+});
+
+describe('fetchTimedtextLines', () => {
+  it('appends &fmt=srv1 when the base_url has no fmt param', async () => {
+    const seen: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      seen.push(url);
+      return new Response('<transcript></transcript>', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await fetchTimedtextLines('https://yt/api/timedtext?v=abc', fetchImpl);
+    expect(seen[0]).toBe('https://yt/api/timedtext?v=abc&fmt=srv1');
+  });
+
+  it('leaves base_url alone when fmt= is already present', async () => {
+    const seen: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      seen.push(url);
+      return new Response('<transcript></transcript>', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await fetchTimedtextLines('https://yt/api/timedtext?v=abc&fmt=json3', fetchImpl);
+    expect(seen[0]).toBe('https://yt/api/timedtext?v=abc&fmt=json3');
+  });
+
+  it('returns parsed TranscriptLine[] on a well-formed srv1 body', async () => {
+    const xml =
+      '<transcript>' +
+      '<text start="0" dur="2">hi</text>' +
+      '<text start="2" dur="1">there</text>' +
+      '</transcript>';
+    const fetchImpl = (async () =>
+      new Response(xml, { status: 200 })) as unknown as typeof fetch;
+
+    const lines = await fetchTimedtextLines('https://yt/x', fetchImpl);
+    expect(lines).toEqual([
+      { startSec: 0, endSec: 2, text: 'hi' },
+      { startSec: 2, endSec: 3, text: 'there' },
+    ]);
+  });
+
+  it('returns [] on 200-with-empty-body (the WEB pot-missing signature, s158)', async () => {
+    const fetchImpl = (async () =>
+      new Response('', { status: 200 })) as unknown as typeof fetch;
+
+    const lines = await fetchTimedtextLines('https://yt/x', fetchImpl);
+    expect(lines).toEqual([]);
+  });
+
+  it('throws on non-2xx status (surfaces caller decisions like retry vs bail)', async () => {
+    const fetchImpl = (async () =>
+      new Response('nope', { status: 403 })) as unknown as typeof fetch;
+
+    await expect(fetchTimedtextLines('https://yt/x', fetchImpl)).rejects.toThrow(
+      /timedtext fetch failed: 403/
+    );
   });
 });
