@@ -110,9 +110,15 @@ async function getClientCaptionTracks(
 
 /** Best-effort class-name extraction for the `<client>_error=` breadcrumb --
  * non-Error throws (rare, but `Innertube.create`/`getInfo` are third-party)
- * fall back to a fixed label instead of crashing the breadcrumb path itself. */
+ * fall back to a fixed label instead of crashing the breadcrumb path itself.
+ * When the thrown value is an Error, the first 100 chars of its `message`
+ * (newlines stripped, single-lined) are appended after a `:` so device logs
+ * distinguish library bugs from schema drift without another ship cycle. */
 function errorClassName(err: unknown): string {
-  if (err instanceof Error) return err.constructor.name;
+  if (err instanceof Error) {
+    const msg = (err.message ?? '').slice(0, 100).replace(/[\r\n]+/g, ' ');
+    return msg ? `${err.constructor.name}:${msg}` : err.constructor.name;
+  }
   return 'UnknownError';
 }
 
