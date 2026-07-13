@@ -1,8 +1,15 @@
 // The `/web` subpath is mandatory (Marcelo s152 spec) -- it avoids the Node.js
 // `fs`-dependent platform bindings that crash the RN/Metro bundler. Do not
 // import from 'youtubei.js' (root) or 'youtubei.js/node'.
-import { Innertube } from 'youtubei.js/web';
-import { mapSegments, parseTimedtextSrv1, transcriptToText, TranscriptLine } from './segmentMap';
+import { Innertube, ClientType } from 'youtubei.js/web';
+import {
+  CaptionTrackLike,
+  fetchTimedtextLines,
+  mapSegments,
+  pickCaptionTrack,
+  transcriptToText,
+  TranscriptLine,
+} from './segmentMap';
 
 export type { TranscriptLine };
 export { transcriptToText };
@@ -39,6 +46,34 @@ async function getInnertube(customFetch?: typeof fetch): Promise<Innertube> {
 }
 
 /**
+ * Fetches ANDROID-client caption_tracks for `videoId`. The WEB client's signed
+ * timedtext URLs went pot-gated in 2025 -- signature validates (200) but the
+ * body is empty. ANDROID uses a separate signing path that (so far) does not
+ * require pot, so we build a second Innertube against ClientType.ANDROID and
+ * re-fetch info to pick a working track.
+ *
+ * Always builds a fresh instance (not shared with the WEB singleton) since
+ * client_type is baked into session context.
+ */
+async function getAndroidCaptionTracks(
+  videoId: string,
+  customFetch?: typeof fetch
+): Promise<CaptionTrackLike[]> {
+  const androidYt = await Innertube.create({
+    client_type: ClientType.ANDROID,
+    lang: 'en',
+    location: 'US',
+    retrieve_player: true,
+    ...(customFetch ? { fetch: customFetch } : {}),
+  });
+  const androidInfo = await androidYt.getInfo(videoId);
+  const androidCaptions = (androidInfo as unknown as {
+    captions?: { caption_tracks?: CaptionTrackLike[] };
+  }).captions;
+  return androidCaptions?.caption_tracks ?? [];
+}
+
+/**
  * Fetches a video's transcript via youtubei.js. `onBreadcrumb` is called at each
  * stage transition -- mirrors the Kotlin ScrapeLogFile breadcrumb design so the UI
  * can render a log-over-progress-bar view instead of a spinner.
@@ -69,11 +104,7 @@ export async function fetchTranscript(
   // so case 2 falls back to a direct timedtext fetch through the same custom
   // fetch (keeps the debug network log intact).
   const captionsAny = (info as unknown as {
-    captions?: { caption_tracks?: Array<{
-      base_url?: string;
-      language_code?: string;
-      kind?: string;
-    }> };
+    captions?: { caption_tracks?: CaptionTrackLike[] };
     has_transcript?: boolean;
   }).captions;
   const captionTracks = captionsAny?.caption_tracks ?? [];
@@ -83,6 +114,10 @@ export async function fetchTranscript(
     onBreadcrumb('no_captions_found');
     throw new Error('No captions available for this video.');
   }
+
+  // Use the caller-supplied fetch when present so the debug network log
+  // records the timedtext GET; otherwise fall through to global fetch.
+  const fetchImpl: typeof fetch = customFetch ?? fetch;
 
   let lines: TranscriptLine[];
   try {
@@ -114,10 +149,7 @@ export async function fetchTranscript(
     onBreadcrumb('transcript_fetch_fallback');
     // Prefer manual English → any English → first track. Manual English is
     // higher quality than ASR ("auto-generated speech recognition").
-    const track =
-      captionTracks.find((t) => t.language_code === 'en' && t.kind !== 'asr') ??
-      captionTracks.find((t) => t.language_code === 'en') ??
-      captionTracks[0];
+    const track = pickCaptionTrack(captionTracks);
 
     const baseUrl = track?.base_url;
     if (!baseUrl) {
@@ -126,19 +158,40 @@ export async function fetchTranscript(
       throw err;
     }
 
-    const url = baseUrl.includes('fmt=') ? baseUrl : baseUrl + '&fmt=srv1';
-    // Use the caller-supplied fetch when present so the debug network log
-    // records the timedtext GET; otherwise fall through to global fetch.
-    const fetchImpl: typeof fetch = customFetch ?? fetch;
-    const resp = await fetchImpl(url);
-    if (!resp.ok) {
-      throw new Error(`timedtext fetch failed: ${resp.status}`);
-    }
-    const xml = await resp.text();
-    lines = parseTimedtextSrv1(xml);
+    lines = await fetchTimedtextLines(baseUrl, fetchImpl);
+
     if (lines.length === 0) {
-      onBreadcrumb('no_captions_found');
-      throw new Error('No captions available for this video.');
+      // WEB srv1 200-with-empty-body: signature valid, but pot ("proof of
+      // origin token") is missing on YouTube's 2025 signed caption URLs.
+      // Retry via ANDROID Innertube: its caption_tracks are signed on a path
+      // that does not (yet) require pot. If ANDROID also comes back empty or
+      // errors, surface the standard "no captions" message.
+      onBreadcrumb('timedtext_empty_retry_android');
+      try {
+        const androidTracks = await getAndroidCaptionTracks(videoId, customFetch);
+        const androidTrack = pickCaptionTrack(androidTracks);
+        const androidBaseUrl = androidTrack?.base_url;
+        if (!androidBaseUrl) {
+          onBreadcrumb('no_captions_found');
+          throw new Error('No captions available for this video.');
+        }
+
+        lines = await fetchTimedtextLines(androidBaseUrl, fetchImpl);
+        if (lines.length === 0) {
+          onBreadcrumb('no_captions_found');
+          throw new Error('No captions available for this video.');
+        }
+      } catch (androidErr) {
+        // Only unwrap when we already surfaced "no captions". Any other error
+        // (fetch failure, Innertube.create rejection, etc.) still counts as
+        // "captions not retrievable" for the user; preserve the message shape.
+        if (androidErr instanceof Error &&
+            androidErr.message === 'No captions available for this video.') {
+          throw androidErr;
+        }
+        onBreadcrumb('no_captions_found');
+        throw new Error('No captions available for this video.');
+      }
     }
     onBreadcrumb('transcript_fetched');
     onBreadcrumb('segments_mapped');
