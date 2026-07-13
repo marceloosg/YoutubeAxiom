@@ -29,16 +29,20 @@ async function getInnertube(customFetch?: typeof fetch): Promise<Innertube> {
   // shared singleton (would break subsequent default-fetch UI calls). Rebuild a
   // fresh Innertube for those; default path keeps the cached singleton.
   //
-  // s162 Path A: `retrieve_player: false` -- captions don't need player
-  // streams, and `retrieve_player: true` was the likely trigger for the
-  // youtubei.js PlayerStoryboardSpec parse bug (TypeError across every
-  // fallback tier in the v1.0.8 device log, msg 7086 s162; matches
-  // LuanRT/YouTube.js#196, #671, #841).
+  // s162 v1.0.10: WEB primary keeps `retrieve_player: true`. Empirically,
+  // `retrieve_player: false` on WEB nullifies `info.captions.caption_tracks`
+  // at parse time, which broke the `no_captions_found` fallback-trigger check
+  // in `fetchTranscript` -- every video short-circuited to the fast-fail path
+  // before the TVHTML5/ANDROID_VR retry chain ever ran (v1.0.9 device log,
+  // msg 7140). The retry tiers below (`getClientCaptionTracks`) still pass
+  // `retrieve_player: false` -- that's the actual Path A bypass for the
+  // youtubei.js PlayerStoryboardSpec parse bug (v1.0.8 device log, msg 7086;
+  // matches LuanRT/YouTube.js#196, #671, #841); WEB never hit that bug.
   if (customFetch) {
     return Innertube.create({
       lang: 'en',
       location: 'US',
-      retrieve_player: false,
+      retrieve_player: true,
       fetch: customFetch,
     });
   }
@@ -46,7 +50,7 @@ async function getInnertube(customFetch?: typeof fetch): Promise<Innertube> {
   innertubeSingleton = await Innertube.create({
     lang: 'en',
     location: 'US',
-    retrieve_player: false,
+    retrieve_player: true,
   });
   return innertubeSingleton;
 }

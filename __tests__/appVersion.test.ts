@@ -1,4 +1,4 @@
-import { resolveAppVersion } from '../src/util/appVersion';
+import { resolveAppVersion, resolveCommitSha } from '../src/util/appVersion';
 import { composeShareLog } from '../src/log/shareLog';
 
 describe('resolveAppVersion (s161)', () => {
@@ -32,5 +32,15 @@ describe('resolveAppVersion (s161)', () => {
 
     expect(header).toMatch(/YoutubeAxiom v\d+\.\d+\.\d+/);
     expect(header).not.toContain('v1.0.4');
+  });
+});
+
+describe('resolveCommitSha (s162 v1.0.10, msg 7133)', () => {
+  it('prefers the expoConfig commitSha when present', () => {
+    expect(resolveCommitSha('55cabd1')).toBe('55cabd1');
+  });
+
+  it('falls back to "local" when expoConfig commitSha is undefined', () => {
+    expect(resolveCommitSha(undefined)).toBe('local');
   });
 });

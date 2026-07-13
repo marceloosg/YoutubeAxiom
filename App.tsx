@@ -15,7 +15,7 @@ import * as Sharing from 'expo-sharing';
 import Constants from 'expo-constants';
 
 import { parseVideoId } from './src/util/videoId';
-import { resolveAppVersion } from './src/util/appVersion';
+import { resolveAppVersion, resolveCommitSha } from './src/util/appVersion';
 import { fetchTranscript, transcriptToText, TranscriptLine } from './src/scrape/youtubeiClient';
 import { postTranscript } from './src/backend/api';
 import { useBreadcrumbLog } from './src/log/breadcrumbs';
@@ -42,6 +42,13 @@ import {
 const APP_VERSION: string = resolveAppVersion(
   Constants.expoConfig?.version,
   (require('./package.json').version as string)
+);
+
+// msg 7133: "print version commit on app header just for me to make sure i
+// am exec the right version". Sourced from `Constants.expoConfig.extra.commitSha`,
+// populated at build time by `app.config.js` via `git rev-parse --short HEAD`.
+const COMMIT_SHA: string = resolveCommitSha(
+  Constants.expoConfig?.extra?.commitSha as string | undefined
 );
 
 /**
@@ -214,6 +221,7 @@ export default function App() {
   const onShareExtractLog = async () => {
     const composed = composeShareLog({
       appVersion: APP_VERSION,
+      commitSha: COMMIT_SHA,
       context: 'extract',
       atMs: Date.now(),
       breadcrumbLines: extractBreadcrumbs.formattedLines,
@@ -227,6 +235,7 @@ export default function App() {
     const summary = ['--- test-suite summary ---', ...summarizeTestRows(TEST_VIDEOS, testRows), ''];
     const composed = composeShareLog({
       appVersion: APP_VERSION,
+      commitSha: COMMIT_SHA,
       context: 'test suite',
       atMs: Date.now(),
       breadcrumbLines: [...summary, ...testBreadcrumbs.formattedLines],
@@ -248,6 +257,9 @@ export default function App() {
       <ScrollView contentContainerStyle={styles.scrollBody}>
         {/* ========== Extract section (user mode) ========== */}
         <Text style={styles.heading}>YouTube Caption Extractor</Text>
+        <Text style={styles.versionSubtitle}>
+          v{APP_VERSION} · {COMMIT_SHA}
+        </Text>
 
         <TextInput
           style={styles.input}
@@ -411,6 +423,12 @@ const styles = StyleSheet.create({
   heading: {
     fontSize: 20,
     fontWeight: '600',
+    marginBottom: 12,
+  },
+  versionSubtitle: {
+    fontSize: 11,
+    color: '#999',
+    marginTop: -8,
     marginBottom: 12,
   },
   input: {
