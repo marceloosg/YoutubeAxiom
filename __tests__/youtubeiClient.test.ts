@@ -281,3 +281,98 @@ describe('fetchTranscript ANDROID retry (s158)', () => {
     expect(createCalls.length).toBe(1);
   });
 });
+
+describe('<client>_error breadcrumb on pre-emit tier failure (s161)', () => {
+  it('emits android_error=<ClassName> when the ANDROID tier throws before tracks are read, then still advances to IOS', async () => {
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/web?x', language_code: 'en' }]),
+    });
+    // ANDROID tier: the session itself throws (mirrors s160 device logs where
+    // no `android_tracks=N` breadcrumb ever appeared -- getInfo rejected
+    // before the tracks length could be read).
+    createQueue.push({
+      getInfo: async () => {
+        throw new TypeError('android session rejected');
+      },
+    });
+    // IOS tier: recovers with a real track.
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/ios?ei=ios&sig=IOS', language_code: 'en' }]),
+    });
+
+    const fakeFetch = jest.fn(async (input: RequestInfo) => {
+      const url = typeof input === 'string' ? input : (input as Request).url;
+      if (url.startsWith('https://yt/web')) return new Response('', { status: 200 });
+      if (url.startsWith('https://yt/ios')) {
+        return new Response(
+          '<transcript><text start="0" dur="2">from ios</text></transcript>',
+          { status: 200 }
+        );
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const breadcrumbs: string[] = [];
+    const result = await fetchTranscript(
+      'vid-android-throw',
+      (l) => breadcrumbs.push(l),
+      fakeFetch
+    );
+
+    expect(result.lines).toEqual([{ startSec: 0, endSec: 2, text: 'from ios' }]);
+    expect(breadcrumbs).toContain('timedtext_empty_retry_android');
+    expect(breadcrumbs).toContain('android_error=TypeError');
+    // The tracks breadcrumb for ANDROID must NOT appear -- the throw happened
+    // before it could be read, which is exactly the gap this fix closes.
+    expect(breadcrumbs.some((b) => b.startsWith('android_tracks='))).toBe(false);
+    expect(breadcrumbs).toContain('timedtext_empty_retry_ios');
+    expect(breadcrumbs).toContain('ios_tracks=1');
+  });
+
+  it('emits an _error breadcrumb per tier when ANDROID, IOS, and TVHTML5 all throw pre-emit', async () => {
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/web?x', language_code: 'en' }]),
+    });
+    createQueue.push({
+      getInfo: async () => {
+        throw new TypeError('android boom');
+      },
+    });
+    createQueue.push({
+      getInfo: async () => {
+        throw new RangeError('ios boom');
+      },
+    });
+    createQueue.push({
+      getInfo: async () => {
+        // Non-Error throw -- errorClassName must fall back gracefully instead
+        // of crashing the breadcrumb path itself.
+        throw 'tv boom (not an Error instance)';
+      },
+    });
+
+    const fakeFetch = jest.fn(async () => new Response('', { status: 200 })) as unknown as typeof fetch;
+
+    const breadcrumbs: string[] = [];
+    await expect(
+      fetchTranscript('vid-all-throw', (l) => breadcrumbs.push(l), fakeFetch)
+    ).rejects.toThrow('No captions available for this video.');
+
+    expect(breadcrumbs).toEqual([
+      'starting_scrape',
+      'primary_start',
+      'info_fetched',
+      'transcript_fetch_fallback',
+      'timedtext_empty_retry_android',
+      'android_error=TypeError',
+      'timedtext_empty_retry_ios',
+      'ios_error=RangeError',
+      'timedtext_empty_retry_tvhtml5',
+      'tvhtml5_error=UnknownError',
+      'no_captions_found',
+    ]);
+  });
+});

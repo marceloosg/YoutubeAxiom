@@ -12,8 +12,10 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
+import Constants from 'expo-constants';
 
 import { parseVideoId } from './src/util/videoId';
+import { resolveAppVersion } from './src/util/appVersion';
 import { fetchTranscript, transcriptToText, TranscriptLine } from './src/scrape/youtubeiClient';
 import { postTranscript } from './src/backend/api';
 import { useBreadcrumbLog } from './src/log/breadcrumbs';
@@ -31,7 +33,16 @@ import {
   TestVideoFixture,
 } from './src/log/testSuite';
 
-const APP_VERSION = '1.0.4';
+// s161 fix: was hardcoded '1.0.4' -- device shareLog headers kept reporting a
+// stale version no matter which build was actually installed (2026-07-13
+// device test showed "v1.0.4" running on the v1.0.6 APK). Read the real
+// version at runtime instead: `expo.version` from app.json via expoConfig
+// (set at build time), falling back to package.json's version field if
+// Constants isn't populated (e.g. bare Jest/web runs without a native config).
+const APP_VERSION: string = resolveAppVersion(
+  Constants.expoConfig?.version,
+  (require('./package.json').version as string)
+);
 
 /**
  * Fixed diagnostic fixtures for the on-device test harness (s157).

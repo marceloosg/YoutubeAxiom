@@ -108,6 +108,14 @@ async function getClientCaptionTracks(
   return clientCaptions?.caption_tracks ?? [];
 }
 
+/** Best-effort class-name extraction for the `<client>_error=` breadcrumb --
+ * non-Error throws (rare, but `Innertube.create`/`getInfo` are third-party)
+ * fall back to a fixed label instead of crashing the breadcrumb path itself. */
+function errorClassName(err: unknown): string {
+  if (err instanceof Error) return err.constructor.name;
+  return 'UnknownError';
+}
+
 /**
  * Retries the timedtext fetch through a single alternate Innertube client
  * tier (ANDROID, IOS, TV/TVHTML5). Emits a `<client>_tracks=N` breadcrumb
@@ -116,6 +124,15 @@ async function getClientCaptionTracks(
  * ship cycle. Throws the standard NO_CAPTIONS sentinel message whenever this
  * tier has nothing usable (empty tracks, no base_url, or empty srv1 body);
  * callers chain tiers by catching this and moving to the next one.
+ *
+ * s161 fix: `getClientCaptionTracks` (Innertube.create + getInfo) can throw
+ * before the `<client>_tracks=N` breadcrumb is ever emitted -- s160 device
+ * logs showed every non-WEB tier going straight from its `timedtext_empty_retry_*`
+ * enter-marker to the NEXT tier's enter-marker (or to `no_captions_found`),
+ * with no `_tracks=` breadcrumb in between and no signal for WHY. Wrap the
+ * call so a pre-emit throw still surfaces a `<client>_error=<ErrorClass>`
+ * breadcrumb before the tier is abandoned; the outer per-tier catch in
+ * `fetchTranscript` still advances to the next tier exactly as before.
  */
 async function retryViaClient(
   clientType: RetryClientType,
@@ -125,7 +142,13 @@ async function retryViaClient(
   customFetch?: typeof fetch
 ): Promise<TranscriptLine[]> {
   const meta = RETRY_TIER_META[clientType];
-  const tracks = await getClientCaptionTracks(clientType, videoId, customFetch);
+  let tracks: CaptionTrackLike[];
+  try {
+    tracks = await getClientCaptionTracks(clientType, videoId, customFetch);
+  } catch (err) {
+    onBreadcrumb(`${clientType.toLowerCase()}_error=${errorClassName(err)}`);
+    throw err;
+  }
   onBreadcrumb(`${meta.tracksLabel}=${tracks.length}`);
 
   const track = pickCaptionTrack(tracks);
