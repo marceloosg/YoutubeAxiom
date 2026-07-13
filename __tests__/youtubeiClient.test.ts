@@ -1,8 +1,17 @@
 /**
- * Integration-style test for the WEB→ANDROID retry fallback added s158.
+ * Integration-style test for the WEB→ANDROID→IOS→TVHTML5 retry fallback
+ * (ANDROID added s158, IOS+TVHTML5 added s160).
  * The whole `youtubei.js/web` module is mocked out so this test file can run
  * under Node 18 (the runtime jest-expo boots) despite youtubei.js's
  * `with { type: 'json' }` ESM import assertion that Node 18 can't parse.
+ *
+ * NOTE on ClientType values: the real youtubei.js v17.2.0 export
+ * (`node_modules/youtubei.js/dist/src/core/Session.js`) has `IOS: "iOS"` (not
+ * `"IOS"`) and no `TVHTML5` key at all -- the TV client lives at `TV`, whose
+ * value is `"TVHTML5"`. The mock below mirrors those exact values/keys so
+ * this test exercises the same `ClientType.TV`/`ClientType.IOS` references
+ * the production code actually imports, instead of a shape that happens to
+ * make the test pass but would silently break `client_type` in prod.
  */
 
 type CaptionTrack = { base_url?: string; language_code?: string; kind?: string };
@@ -18,14 +27,14 @@ interface FakeInnertube {
   getInfo: (videoId: string) => Promise<FakeInfo>;
 }
 
-// Both Innertube.create calls (WEB singleton + ANDROID retry) route through
-// this queue so a single test can prime multiple info shapes.
+// All Innertube.create calls (WEB singleton + ANDROID/IOS/TV retries) route
+// through this queue so a single test can prime multiple info shapes.
 const createQueue: FakeInnertube[] = [];
 const createCalls: Array<Record<string, unknown>> = [];
 
 jest.mock('youtubei.js/web', () => ({
   __esModule: true,
-  ClientType: { ANDROID: 'ANDROID', WEB: 'WEB' },
+  ClientType: { WEB: 'WEB', ANDROID: 'ANDROID', IOS: 'iOS', TV: 'TVHTML5' },
   Innertube: {
     create: jest.fn(async (opts: Record<string, unknown> = {}) => {
       createCalls.push(opts);
@@ -108,7 +117,105 @@ describe('fetchTranscript ANDROID retry (s158)', () => {
     expect(seenUrls[1]).toContain('yt/android');
   });
 
-  it('surfaces "No captions available" when ANDROID retry also returns empty', async () => {
+  it('falls through ANDROID (0 tracks) to IOS which returns real srv1 lines', async () => {
+    // WEB: pot-gated empty body.
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/web?x', language_code: 'en' }]),
+    });
+    // ANDROID: getInfo succeeds but caption_tracks is empty -- no base_url to try.
+    createQueue.push({ getInfo: async () => makeInfoWith([]) });
+    // IOS: returns a track whose srv1 body has real lines.
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/ios?ei=ios&sig=IOS', language_code: 'en' }]),
+    });
+
+    const fakeFetch = jest.fn(async (input: RequestInfo) => {
+      const url = typeof input === 'string' ? input : (input as Request).url;
+      if (url.startsWith('https://yt/web')) return new Response('', { status: 200 });
+      if (url.startsWith('https://yt/ios')) {
+        return new Response(
+          '<transcript><text start="0" dur="2">from ios</text></transcript>',
+          { status: 200 }
+        );
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const breadcrumbs: string[] = [];
+    const result = await fetchTranscript('vid-ios', (l) => breadcrumbs.push(l), fakeFetch);
+
+    expect(result.lines).toEqual([{ startSec: 0, endSec: 2, text: 'from ios' }]);
+    expect(breadcrumbs).toContain('timedtext_empty_retry_android');
+    expect(breadcrumbs).toContain('android_tracks=0');
+    expect(breadcrumbs).toContain('timedtext_empty_retry_ios');
+    expect(breadcrumbs).toContain('ios_tracks=1');
+    expect(breadcrumbs).not.toContain('timedtext_empty_retry_tvhtml5');
+    // WEB, ANDROID, IOS -- three Innertube.create calls, TV never reached.
+    expect(createCalls.length).toBe(3);
+    expect(createCalls[1].client_type).toBe('ANDROID');
+    expect(createCalls[2].client_type).toBe('iOS');
+  });
+
+  it('falls through ANDROID (tracks but empty body) and IOS (empty) to TVHTML5', async () => {
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/web?x', language_code: 'en' }]),
+    });
+    // ANDROID: has a track, but its srv1 body is empty (pot-gated too).
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/android?x', language_code: 'en' }]),
+    });
+    // IOS: no caption_tracks at all.
+    createQueue.push({ getInfo: async () => makeInfoWith([]) });
+    // TVHTML5: real srv1 lines.
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/tv?ei=tv&sig=TV', language_code: 'en' }]),
+    });
+
+    const fakeFetch = jest.fn(async (input: RequestInfo) => {
+      const url = typeof input === 'string' ? input : (input as Request).url;
+      if (url.startsWith('https://yt/web')) return new Response('', { status: 200 });
+      if (url.startsWith('https://yt/android')) return new Response('', { status: 200 });
+      if (url.startsWith('https://yt/tv')) {
+        return new Response(
+          '<transcript><text start="1" dur="3">from tv</text></transcript>',
+          { status: 200 }
+        );
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const breadcrumbs: string[] = [];
+    const result = await fetchTranscript('vid-tv', (l) => breadcrumbs.push(l), fakeFetch);
+
+    expect(result.lines).toEqual([{ startSec: 1, endSec: 4, text: 'from tv' }]);
+    // Exact breadcrumb sequence across the 4-tier fallback, including the
+    // <client>_tracks=N diagnostic markers.
+    expect(breadcrumbs).toEqual([
+      'starting_scrape',
+      'primary_start',
+      'info_fetched',
+      'transcript_fetch_fallback',
+      'timedtext_empty_retry_android',
+      'android_tracks=1',
+      'timedtext_empty_retry_ios',
+      'ios_tracks=0',
+      'timedtext_empty_retry_tvhtml5',
+      'tvhtml5_tracks=1',
+      'transcript_fetched',
+      'segments_mapped',
+    ]);
+    expect(createCalls.length).toBe(4);
+    expect(createCalls[1].client_type).toBe('ANDROID');
+    expect(createCalls[2].client_type).toBe('iOS');
+    expect(createCalls[3].client_type).toBe('TVHTML5');
+  });
+
+  it('surfaces "No captions available" when all 4 tiers (WEB/ANDROID/IOS/TVHTML5) return empty', async () => {
     createQueue.push({
       getInfo: async () =>
         makeInfoWith([{ base_url: 'https://yt/web?x', language_code: 'en' }]),
@@ -116,6 +223,14 @@ describe('fetchTranscript ANDROID retry (s158)', () => {
     createQueue.push({
       getInfo: async () =>
         makeInfoWith([{ base_url: 'https://yt/android?x', language_code: 'en' }]),
+    });
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/ios?x', language_code: 'en' }]),
+    });
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/tv?x', language_code: 'en' }]),
     });
 
     const fakeFetch = jest.fn(async () =>
@@ -127,8 +242,20 @@ describe('fetchTranscript ANDROID retry (s158)', () => {
       fetchTranscript('vid456', (l) => breadcrumbs.push(l), fakeFetch)
     ).rejects.toThrow('No captions available for this video.');
 
-    expect(breadcrumbs).toContain('timedtext_empty_retry_android');
-    expect(breadcrumbs).toContain('no_captions_found');
+    expect(breadcrumbs).toEqual([
+      'starting_scrape',
+      'primary_start',
+      'info_fetched',
+      'transcript_fetch_fallback',
+      'timedtext_empty_retry_android',
+      'android_tracks=1',
+      'timedtext_empty_retry_ios',
+      'ios_tracks=1',
+      'timedtext_empty_retry_tvhtml5',
+      'tvhtml5_tracks=1',
+      'no_captions_found',
+    ]);
+    expect(createCalls.length).toBe(4);
   });
 
   it('does not fire ANDROID retry when WEB srv1 fallback already returns lines', async () => {
