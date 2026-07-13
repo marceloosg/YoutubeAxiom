@@ -41,4 +41,29 @@ describe('composeShareLog', () => {
     const emptyMatches = out.match(/\(empty\)/g);
     expect(emptyMatches).toHaveLength(2);
   });
+
+  it('includes the commit SHA in the header when supplied (s162 v1.0.10, msg 7133)', () => {
+    const out = composeShareLog({
+      appVersion: '1.0.10',
+      commitSha: '55cabd1',
+      context: 'vid123',
+      atMs: fixedMs,
+      breadcrumbLines: [],
+      networkLines: [],
+    });
+
+    expect(out).toContain('YoutubeAxiom v1.0.10 (55cabd1)');
+  });
+
+  it('falls back to "local" for the commit SHA when not supplied', () => {
+    const out = composeShareLog({
+      appVersion: '1.0.10',
+      context: 'vid123',
+      atMs: fixedMs,
+      breadcrumbLines: [],
+      networkLines: [],
+    });
+
+    expect(out).toContain('YoutubeAxiom v1.0.10 (local)');
+  });
 });

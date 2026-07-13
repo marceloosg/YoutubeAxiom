@@ -24,3 +24,15 @@ export function resolveAppVersion(
 ): string {
   return expoConfigVersion ?? packageJsonVersion;
 }
+
+/**
+ * Resolves the commit SHA shown alongside the app version (header + shareLog),
+ * so Marcelo can confirm which build is actually running on-device (msg 7133).
+ * Sourced from `Constants.expoConfig.extra.commitSha`, populated at build time
+ * by `app.config.js` via `git rev-parse --short HEAD`. Falls back to `'local'`
+ * when unavailable (e.g. bare Jest runs, or a non-git build artifact) --
+ * matches the same-named fallback `app.config.js` itself uses.
+ */
+export function resolveCommitSha(expoConfigCommitSha: string | undefined): string {
+  return expoConfigCommitSha ?? 'local';
+}

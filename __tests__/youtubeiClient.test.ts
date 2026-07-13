@@ -70,8 +70,8 @@ beforeEach(() => {
   createCalls.length = 0;
 });
 
-describe('fetchTranscript retrieve_player (s162)', () => {
-  it('uses retrieve_player: false for the primary WEB Innertube', async () => {
+describe('fetchTranscript retrieve_player (s162, WEB restored v1.0.10)', () => {
+  it('uses retrieve_player: true for the primary WEB Innertube', async () => {
     createQueue.push({
       getInfo: async () =>
         makeInfoWith(
@@ -89,7 +89,10 @@ describe('fetchTranscript retrieve_player (s162)', () => {
 
     await fetchTranscript('vid-retrieve-player', () => {}, fakeFetch);
 
-    expect(createCalls[0].retrieve_player).toBe(false);
+    // v1.0.10: WEB primary restores retrieve_player:true -- retrieve_player:false
+    // on WEB nullified info.captions.caption_tracks, breaking the fallback
+    // trigger (v1.0.9 device log msg 7140).
+    expect(createCalls[0].retrieve_player).toBe(true);
   });
 
   it('uses retrieve_player: false for TVHTML5 retry Innertube', async () => {
