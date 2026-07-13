@@ -1,6 +1,6 @@
 {
   "name": "youtubecaptionapp",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "main": "index.ts",
   "dependencies": {
     "crypto-js": "^4.2.0",

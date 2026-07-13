@@ -323,7 +323,7 @@ describe('<client>_error breadcrumb on pre-emit tier failure (s161)', () => {
 
     expect(result.lines).toEqual([{ startSec: 0, endSec: 2, text: 'from ios' }]);
     expect(breadcrumbs).toContain('timedtext_empty_retry_android');
-    expect(breadcrumbs).toContain('android_error=TypeError');
+    expect(breadcrumbs).toContain('android_error=TypeError:android session rejected');
     // The tracks breadcrumb for ANDROID must NOT appear -- the throw happened
     // before it could be read, which is exactly the gap this fix closes.
     expect(breadcrumbs.some((b) => b.startsWith('android_tracks='))).toBe(false);
@@ -367,12 +367,79 @@ describe('<client>_error breadcrumb on pre-emit tier failure (s161)', () => {
       'info_fetched',
       'transcript_fetch_fallback',
       'timedtext_empty_retry_android',
-      'android_error=TypeError',
+      'android_error=TypeError:android boom',
       'timedtext_empty_retry_ios',
-      'ios_error=RangeError',
+      'ios_error=RangeError:ios boom',
       'timedtext_empty_retry_tvhtml5',
       'tvhtml5_error=UnknownError',
       'no_captions_found',
     ]);
+  });
+
+  it('truncates the error message to 100 chars after the class name', async () => {
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/web?x', language_code: 'en' }]),
+    });
+    createQueue.push({
+      getInfo: async () => {
+        throw new TypeError('a'.repeat(200));
+      },
+    });
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/ios?ei=ios&sig=IOS', language_code: 'en' }]),
+    });
+
+    const fakeFetch = jest.fn(async (input: RequestInfo) => {
+      const url = typeof input === 'string' ? input : (input as Request).url;
+      if (url.startsWith('https://yt/web')) return new Response('', { status: 200 });
+      if (url.startsWith('https://yt/ios')) {
+        return new Response(
+          '<transcript><text start="0" dur="2">from ios</text></transcript>',
+          { status: 200 }
+        );
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const breadcrumbs: string[] = [];
+    await fetchTranscript('vid-android-long-message', (l) => breadcrumbs.push(l), fakeFetch);
+
+    const errorBreadcrumb = breadcrumbs.find((b) => b.startsWith('android_error='));
+    expect(errorBreadcrumb).toBe(`android_error=TypeError:${'a'.repeat(100)}`);
+  });
+
+  it('strips newlines from the error message into a single-line breadcrumb', async () => {
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/web?x', language_code: 'en' }]),
+    });
+    createQueue.push({
+      getInfo: async () => {
+        throw new TypeError('line1\nline2');
+      },
+    });
+    createQueue.push({
+      getInfo: async () =>
+        makeInfoWith([{ base_url: 'https://yt/ios?ei=ios&sig=IOS', language_code: 'en' }]),
+    });
+
+    const fakeFetch = jest.fn(async (input: RequestInfo) => {
+      const url = typeof input === 'string' ? input : (input as Request).url;
+      if (url.startsWith('https://yt/web')) return new Response('', { status: 200 });
+      if (url.startsWith('https://yt/ios')) {
+        return new Response(
+          '<transcript><text start="0" dur="2">from ios</text></transcript>',
+          { status: 200 }
+        );
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const breadcrumbs: string[] = [];
+    await fetchTranscript('vid-android-newline-message', (l) => breadcrumbs.push(l), fakeFetch);
+
+    expect(breadcrumbs).toContain('android_error=TypeError:line1 line2');
   });
 });
