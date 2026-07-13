@@ -28,11 +28,17 @@ async function getInnertube(customFetch?: typeof fetch): Promise<Innertube> {
   // A caller-supplied fetch is only used in debug flows and must not poison the
   // shared singleton (would break subsequent default-fetch UI calls). Rebuild a
   // fresh Innertube for those; default path keeps the cached singleton.
+  //
+  // s162 Path A: `retrieve_player: false` -- captions don't need player
+  // streams, and `retrieve_player: true` was the likely trigger for the
+  // youtubei.js PlayerStoryboardSpec parse bug (TypeError across every
+  // fallback tier in the v1.0.8 device log, msg 7086 s162; matches
+  // LuanRT/YouTube.js#196, #671, #841).
   if (customFetch) {
     return Innertube.create({
       lang: 'en',
       location: 'US',
-      retrieve_player: true,
+      retrieve_player: false,
       fetch: customFetch,
     });
   }
@@ -40,7 +46,7 @@ async function getInnertube(customFetch?: typeof fetch): Promise<Innertube> {
   innertubeSingleton = await Innertube.create({
     lang: 'en',
     location: 'US',
-    retrieve_player: true,
+    retrieve_player: false,
   });
   return innertubeSingleton;
 }
@@ -48,29 +54,37 @@ async function getInnertube(customFetch?: typeof fetch): Promise<Innertube> {
 // Retry-tier client types, in fallback order. NOTE: youtubei.js's real
 // ClientType export (v17.2.0, node_modules/youtubei.js/dist/src/core/Session.js)
 // has no `TVHTML5` key -- the TV client lives at `ClientType.TV` (value
-// `"TVHTML5"`) and `ClientType.IOS` has value `"iOS"` (not `"IOS"`). Reference
-// the enum members directly rather than string literals so a future youtubei.js
-// bump that renames a value doesn't silently pass `client_type: undefined`.
-export type RetryClientType =
-  | typeof ClientType.ANDROID
-  | typeof ClientType.IOS
-  | typeof ClientType.TV;
+// `"TVHTML5"`). Reference the enum members directly rather than string
+// literals so a future youtubei.js bump that renames a value doesn't silently
+// pass `client_type: undefined`.
+//
+// s162 Path A: ANDROID and IOS were dropped from the retry chain. Per the
+// yt-dlp PO Token Guide (2026), ANDROID and IOS both require a pot for
+// GVS/Player -- exactly the failure mode this fallback exists to route
+// around, so retrying through them was futile. TVHTML5 and ANDROID_VR do NOT
+// require a pot. Confirmed at STEP 0 (this ship): `ClientType.ANDROID_VR` ===
+// `"ANDROID_VR"` in the installed youtubei.js@17.2.0.
+export type RetryClientType = typeof ClientType.TV | typeof ClientType.ANDROID_VR;
 
 /**
  * Diagnostic label + entry breadcrumb per retry tier, keyed by the
  * `ClientType` value (not the enum key name, since `ClientType.TV`'s value is
  * `"TVHTML5"`). Machine-greppable strings so on-device logs immediately show
- * which tier had caption_tracks available: `android_tracks=N`, `ios_tracks=N`,
- * `tvhtml5_tracks=N`.
+ * which tier had caption_tracks available: `tvhtml5_tracks=N`,
+ * `android_vr_tracks=N`.
  */
 const RETRY_TIER_META: Record<string, { enterBreadcrumb: string; tracksLabel: string }> = {
-  [ClientType.ANDROID]: { enterBreadcrumb: 'timedtext_empty_retry_android', tracksLabel: 'android_tracks' },
-  [ClientType.IOS]: { enterBreadcrumb: 'timedtext_empty_retry_ios', tracksLabel: 'ios_tracks' },
   [ClientType.TV]: { enterBreadcrumb: 'timedtext_empty_retry_tvhtml5', tracksLabel: 'tvhtml5_tracks' },
+  [ClientType.ANDROID_VR]: { enterBreadcrumb: 'timedtext_empty_retry_android_vr', tracksLabel: 'android_vr_tracks' },
 };
 
-/** Ordered fallback chain: WEB (primary, handled by the caller) -> ANDROID -> IOS -> TV. */
-const RETRY_CLIENT_ORDER: RetryClientType[] = [ClientType.ANDROID, ClientType.IOS, ClientType.TV];
+/**
+ * Ordered fallback chain: WEB (primary, handled by the caller) -> TVHTML5 ->
+ * ANDROID_VR. TVHTML5 goes first -- per the yt-dlp PO Token Guide neither
+ * client requires a pot for GVS/Player, and TVHTML5 was already the
+ * best-performing pot-free tier in prior device logs.
+ */
+const RETRY_CLIENT_ORDER: RetryClientType[] = [ClientType.TV, ClientType.ANDROID_VR];
 
 const NO_CAPTIONS_MESSAGE = 'No captions available for this video.';
 
@@ -80,11 +94,16 @@ function noCaptionsError(): Error {
 
 /**
  * Fetches caption_tracks for `videoId` via an alternate Innertube client
- * (ANDROID / IOS / TV). The WEB client's signed timedtext URLs went pot-gated
- * in 2025 -- signature validates (200) but the body is empty. Each alternate
- * client uses a separate signing path that (so far) does not require pot, so
- * we build a fresh Innertube against the given client_type and re-fetch info
- * to pick a working track.
+ * (TV / ANDROID_VR). The WEB client's signed timedtext URLs went pot-gated
+ * in 2025 -- signature validates (200) but the body is empty. TVHTML5 and
+ * ANDROID_VR do not require a pot for GVS/Player (yt-dlp PO Token Guide,
+ * 2026), so we build a fresh Innertube against the given client_type and
+ * re-fetch info to pick a working track.
+ *
+ * `retrieve_player: false` -- captions don't need player streams; skipping
+ * player retrieval avoids the youtubei.js PlayerStoryboardSpec parse-bug path
+ * implicated in the v1.0.8 device-log TypeError (s162, matches
+ * LuanRT/YouTube.js#196, #671, #841).
  *
  * Always builds a fresh instance (not shared with the WEB singleton) since
  * client_type is baked into session context.
@@ -98,7 +117,7 @@ async function getClientCaptionTracks(
     client_type: clientType,
     lang: 'en',
     location: 'US',
-    retrieve_player: true,
+    retrieve_player: false,
     ...(customFetch ? { fetch: customFetch } : {}),
   });
   const clientInfo = await clientYt.getInfo(videoId);
@@ -124,7 +143,7 @@ function errorClassName(err: unknown): string {
 
 /**
  * Retries the timedtext fetch through a single alternate Innertube client
- * tier (ANDROID, IOS, TV/TVHTML5). Emits a `<client>_tracks=N` breadcrumb
+ * tier (TV/TVHTML5, ANDROID_VR). Emits a `<client>_tracks=N` breadcrumb
  * right after `getInfo` so on-device logs surface which tier had
  * caption_tracks available -- tightens future diagnostics without another
  * ship cycle. Throws the standard NO_CAPTIONS sentinel message whenever this
@@ -260,10 +279,12 @@ export async function fetchTranscript(
     if (lines.length === 0) {
       // WEB srv1 200-with-empty-body: signature valid, but pot ("proof of
       // origin token") is missing on YouTube's 2025 signed caption URLs.
-      // Chain through the alternate-client tiers in order -- ANDROID -> IOS ->
-      // TV (TVHTML5) -- each on a separate signing path that does not (yet)
-      // require pot. If every tier comes back empty or errors, surface the
-      // standard "no captions" message.
+      // Chain through the alternate-client tiers in order -- TV (TVHTML5) ->
+      // ANDROID_VR -- neither of which requires a pot for GVS/Player (yt-dlp
+      // PO Token Guide, 2026; s162 Path A). ANDROID and IOS were dropped from
+      // this chain -- both require a pot for GVS/Player, so retrying through
+      // them was futile. If every tier comes back empty or errors, surface
+      // the standard "no captions" message.
       let retrievedViaTier = false;
       for (const clientType of RETRY_CLIENT_ORDER) {
         const meta = RETRY_TIER_META[clientType];
