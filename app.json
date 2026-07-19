@@ -2,7 +2,7 @@
   "expo": {
     "name": "YoutubeCaptionApp",
     "slug": "YoutubeCaptionApp",
-    "version": "1.0.10",
+    "version": "1.0.11",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -36,7 +36,9 @@
     ],
     "extra": {
       "backendUrl": "https://CHANGE-ME.execute-api.amazonaws.com",
-      "webhookSecret": ""
+      "webhookSecret": "",
+      "lightragBaseUrl": "https://axiom-lightrag.placeholder.internal:8738",
+      "lightragSecret": ""
     }
   }
 }
