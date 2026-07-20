@@ -88,6 +88,13 @@ jobs:
           RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          # PR #15 injected these on the `expo prebuild` step, but Metro
+          # bundling (which bakes Constants.expoConfig.extra into
+          # assets/app.config in the APK) runs inside `./gradlew
+          # assembleRelease`, not prebuild. Injecting here so app.config.js
+          # sees process.env.* at bundle time.
+          LIGHTRAG_BASE_URL: ${{ secrets.LIGHTRAG_BASE_URL }}
+          LIGHTRAG_SECRET: ${{ secrets.LIGHTRAG_SECRET }}
         run: ./gradlew assembleRelease --no-daemon
 
       - name: Upload arm64-v8a APK
