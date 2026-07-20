@@ -21,6 +21,17 @@ module.exports = {
     extra: {
       ...app.expo.extra,
       commitSha,
+      // v1.0.11 shipped the LightRAG Ingest/Ask UI (App.tsx s172 wire-up) but
+      // lightragBaseUrl + lightragSecret in app.json are placeholder values;
+      // editing them directly would leak the real secret into git history.
+      // Read from build-time env vars instead -- Marcelo sets EAS secrets:
+      //   eas secret:create --scope project --name LIGHTRAG_BASE_URL --value http://<ec2-ip>:8738
+      //   eas secret:create --scope project --name LIGHTRAG_SECRET   --value <65B secret from /home/ubuntu/.axiom/lightrag_hmac_secret on axiom EC2>
+      // Non-empty env-var wins; empty/unset falls back to app.json placeholder
+      // so the existing error path still fires clearly (matches the pattern
+      // already used for commitSha above).
+      lightragBaseUrl: process.env.LIGHTRAG_BASE_URL || app.expo.extra.lightragBaseUrl,
+      lightragSecret: process.env.LIGHTRAG_SECRET || app.expo.extra.lightragSecret,
     },
   },
 };
