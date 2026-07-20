@@ -60,6 +60,12 @@ jobs:
           echo "RELEASE_KEYSTORE_PATH=/tmp/release.keystore" >> $GITHUB_ENV
 
       - name: Prebuild native android project
+        env:
+          # app.config.js reads these to bake into Constants.expoConfig.extra
+          # (see PR #14). Empty/unset falls through to app.json placeholders
+          # so the "not configured" error path in lightragApi.ts still fires.
+          LIGHTRAG_BASE_URL: ${{ secrets.LIGHTRAG_BASE_URL }}
+          LIGHTRAG_SECRET: ${{ secrets.LIGHTRAG_SECRET }}
         run: npx expo prebuild --platform android --no-install
 
       - name: Patch build.gradle for release signing + ABI split
