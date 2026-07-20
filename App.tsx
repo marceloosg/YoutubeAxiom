@@ -18,6 +18,7 @@ import { parseVideoId } from './src/util/videoId';
 import { resolveAppVersion, resolveCommitSha } from './src/util/appVersion';
 import { fetchTranscript, transcriptToText, TranscriptLine } from './src/scrape/youtubeiClient';
 import { postTranscript } from './src/backend/api';
+import { postIngest, postAsk, IngestResult } from './src/backend/lightragApi';
 import { useBreadcrumbLog } from './src/log/breadcrumbs';
 import { useNetworkLog } from './src/log/networkLog';
 import { makeInstrumentedFetch } from './src/log/instrumentedFetch';
@@ -76,6 +77,20 @@ export default function App() {
     () => makeInstrumentedFetch(extractNetLog.push),
     [extractNetLog.push]
   );
+
+  // ---------- Ingest tab state (LightRAG, s172 Phase 1 step 3) ----------
+  const [ingestUrl, setIngestUrl] = useState('');
+  const [ingestStatus, setIngestStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>(
+    'idle'
+  );
+  const [ingestResult, setIngestResult] = useState<IngestResult | null>(null);
+  const [ingestError, setIngestError] = useState<string | null>(null);
+
+  // ---------- Ask tab state (LightRAG, s172 Phase 1 step 3) ----------
+  const [askQuery, setAskQuery] = useState('');
+  const [askStatus, setAskStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle');
+  const [askAnswer, setAskAnswer] = useState<string | null>(null);
+  const [askError, setAskError] = useState<string | null>(null);
 
   // ---------- Test-suite state (bottom section, s157 diagnostic) ----------
   const [testRows, setTestRows] = useState<TestRowState[]>(() => initialTestRows(TEST_VIDEOS));
@@ -179,6 +194,45 @@ export default function App() {
       testBreadcrumbs.push(`--- test all: done ${okCount}/${TEST_VIDEOS.length} ---`);
     } finally {
       setIsTesting(false);
+    }
+  };
+
+  /**
+   * Ingest tab submit (LightRAG /ingest, design doc §3/§10 Phase 1 MVP:
+   * single URL only, no crawl selector, no batch/playlist/channel).
+   */
+  const onIngestSubmit = async () => {
+    setIngestStatus('submitting');
+    setIngestError(null);
+    setIngestResult(null);
+    try {
+      const result = await postIngest(ingestUrl.trim());
+      setIngestResult(result);
+      setIngestStatus('success');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setIngestError(message);
+      setIngestStatus('error');
+    }
+  };
+
+  /**
+   * Ask tab submit (LightRAG /ask). Single response, no streaming, no
+   * conversation memory for MVP (design doc §10 Phase 1 / §9 explicit
+   * exclusions).
+   */
+  const onAskSubmit = async () => {
+    setAskStatus('submitting');
+    setAskError(null);
+    setAskAnswer(null);
+    try {
+      const result = await postAsk(askQuery.trim());
+      setAskAnswer(result.answer_text);
+      setAskStatus('success');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setAskError(message);
+      setAskStatus('error');
     }
   };
 
@@ -405,6 +459,79 @@ export default function App() {
 
           {testShareError && <Text style={styles.shareErrorText}>{testShareError}</Text>}
         </View>
+
+        {/* ========== Ingest section (LightRAG /ingest, s172) ========== */}
+        <View style={styles.divider} />
+        <View style={styles.lightragSection}>
+          <Text style={styles.testHeading}>Ingest</Text>
+          <Text style={styles.testSubheading}>
+            Paste a YouTube URL to add it to LightRAG. Single video only for now.
+          </Text>
+
+          <TextInput
+            style={styles.input}
+            placeholder="https://www.youtube.com/watch?v=..."
+            value={ingestUrl}
+            onChangeText={setIngestUrl}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+
+          <Pressable
+            style={[styles.button, ingestStatus === 'submitting' && styles.buttonDisabled]}
+            onPress={onIngestSubmit}
+            disabled={ingestStatus === 'submitting' || ingestUrl.trim().length === 0}
+          >
+            {ingestStatus === 'submitting' ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.buttonText}>Submit</Text>
+            )}
+          </Pressable>
+
+          {ingestStatus === 'submitting' && <Text style={styles.pendingText}>queued</Text>}
+          {ingestStatus === 'success' && ingestResult && (
+            <Text style={styles.success}>success (video_id={ingestResult.video_id})</Text>
+          )}
+          {ingestStatus === 'error' && (
+            <Text style={styles.error}>error: {ingestError}</Text>
+          )}
+        </View>
+
+        {/* ========== Ask section (LightRAG /ask, s172) ========== */}
+        <View style={styles.divider} />
+        <View style={styles.lightragSection}>
+          <Text style={styles.testHeading}>Ask</Text>
+          <Text style={styles.testSubheading}>Ask a question about videos already ingested.</Text>
+
+          <TextInput
+            style={[styles.input, styles.multilineInput]}
+            placeholder="What does this video say about...?"
+            value={askQuery}
+            onChangeText={setAskQuery}
+            multiline
+            numberOfLines={3}
+          />
+
+          <Pressable
+            style={[styles.button, askStatus === 'submitting' && styles.buttonDisabled]}
+            onPress={onAskSubmit}
+            disabled={askStatus === 'submitting' || askQuery.trim().length === 0}
+          >
+            {askStatus === 'submitting' ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.buttonText}>Submit</Text>
+            )}
+          </Pressable>
+
+          {askStatus === 'error' && <Text style={styles.error}>error: {askError}</Text>}
+          {askStatus === 'success' && askAnswer && (
+            <View style={styles.answerBox}>
+              <Text style={styles.answerText}>{askAnswer}</Text>
+            </View>
+          )}
+        </View>
       </ScrollView>
     </View>
   );
@@ -590,5 +717,32 @@ const styles = StyleSheet.create({
     color: '#444',
     marginTop: 3,
     fontFamily: 'monospace',
+  },
+  lightragSection: {
+    backgroundColor: '#f7f9fc',
+    borderRadius: 10,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#e1e6ee',
+  },
+  multilineInput: {
+    minHeight: 70,
+    textAlignVertical: 'top',
+  },
+  pendingText: {
+    color: '#888',
+    marginBottom: 8,
+  },
+  answerBox: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 4,
+    borderWidth: 1,
+    borderColor: '#e6ebf2',
+  },
+  answerText: {
+    fontSize: 14,
+    color: '#222',
   },
 });
