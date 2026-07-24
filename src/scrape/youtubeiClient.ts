@@ -6,10 +6,12 @@ import {
   CaptionTrackLike,
   fetchTimedtextLines,
   mapSegments,
+  parseTimedtextSrv1,
   pickCaptionTrack,
   transcriptToText,
   TranscriptLine,
 } from './segmentMap';
+import { fetchTranscriptViaProxy, getBackendProxyConfig } from '../backend/ytTranscriptProxy';
 
 export type { TranscriptLine };
 export { transcriptToText };
@@ -206,6 +208,34 @@ export async function fetchTranscript(
   onBreadcrumb: Breadcrumb = () => {},
   customFetch?: typeof fetch
 ): Promise<TranscriptResult> {
+  // FIRST TIER (s176-follow): Path K `axiom-yt-transcript` backend proxy.
+  // in-app extraction (below) hits pot-gate + bot-check on non-WEB clients;
+  // the backend already has validated cookie-based yt-dlp access (s163).
+  // `getBackendProxyConfig` returns null when `extra.ytTranscriptBaseUrl` /
+  // `ytTranscriptSecret` aren't configured -- skipped silently, no breadcrumb,
+  // no network attempt, so builds without EAS secrets set behave exactly as
+  // before this change. Any proxy failure also falls through silently to the
+  // existing WEB->TVHTML5->ANDROID_VR chain; `fetchTranscriptViaProxy` never
+  // throws.
+  const proxyConfig = getBackendProxyConfig();
+  if (proxyConfig) {
+    const proxyResult = await fetchTranscriptViaProxy(
+      videoId,
+      proxyConfig,
+      customFetch,
+      onBreadcrumb
+    );
+    if (proxyResult) {
+      const lines = proxyResult.srv1Xml
+        ? parseTimedtextSrv1(proxyResult.srv1Xml)
+        : [{ startSec: 0, endSec: 0, text: proxyResult.text }];
+      if (lines.length > 0) {
+        return { videoId, title: videoId, lines };
+      }
+      onBreadcrumb('backend_proxy_fail=empty_lines');
+    }
+  }
+
   onBreadcrumb('starting_scrape');
 
   const youtube = await getInnertube(customFetch);

@@ -32,6 +32,15 @@ module.exports = {
       // already used for commitSha above).
       lightragBaseUrl: process.env.LIGHTRAG_BASE_URL || app.expo.extra.lightragBaseUrl,
       lightragSecret: process.env.LIGHTRAG_SECRET || app.expo.extra.lightragSecret,
+      // s176-follow: same env-var wiring pattern for the Path K
+      // axiom-yt-transcript backend proxy (port 8737). Marcelo sets EAS secrets:
+      //   eas secret:create --scope project --name YT_TRANSCRIPT_BASE_URL --value http://<ec2-ip>:8737
+      //   eas secret:create --scope project --name YT_TRANSCRIPT_SECRET   --value <secret from AXIOM_YT_SECRET on axiom EC2>
+      // Non-empty env-var wins; empty/unset falls back to app.json placeholder,
+      // which keeps the backend-proxy tier silently skipped (see
+      // src/backend/ytTranscriptProxy.ts's getBackendProxyConfig).
+      ytTranscriptBaseUrl: process.env.YT_TRANSCRIPT_BASE_URL || app.expo.extra.ytTranscriptBaseUrl,
+      ytTranscriptSecret: process.env.YT_TRANSCRIPT_SECRET || app.expo.extra.ytTranscriptSecret,
     },
   },
 };
