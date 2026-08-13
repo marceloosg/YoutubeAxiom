@@ -45,7 +45,15 @@ export function isWebViewScrapeHandlerRegistered(): boolean {
   return activeHandler !== null;
 }
 
-const DEFAULT_TIMEOUT_MS = 25000;
+// 30s (was 25s): this timeout's clock starts at page-navigation, before the
+// page `load` event, while the injected script's ~23.1s worst-case budget
+// (800ms delay + 4s button poll + 10s + 300ms + 8s retry window) only starts
+// counting *after* load. At 25s, cold YouTube desktop page-load ate into a
+// ~1.9s margin -- on the worst-case retry path (segments appear only in
+// attempt 2) with a slow load, the bridge could reject with `timeout` before
+// the segments post, defeating the retry the D19 hardening added. 30s gives
+// ~6.9s headroom for cold load on top of the 23.1s script budget.
+const DEFAULT_TIMEOUT_MS = 30000;
 
 /**
  * NEW TOP TIER (s193, D19 Shape A) -- called from `fetchTranscript` before

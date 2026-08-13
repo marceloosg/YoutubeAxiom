@@ -115,7 +115,10 @@ export function extractionTargetUrl(videoId: string): string {
  *      check) -- a retry has a shot at recovering from a transient miss that a
  *      longer single wait wouldn't. Total worst-case budget (~23.1s: 800ms
  *      pre-run delay + up to 4s button poll + 10s + 300ms gap + 8s) stays
- *      under `webviewScrapeBridge.ts`'s 25s `DEFAULT_TIMEOUT_MS` so a retry
+ *      under `webviewScrapeBridge.ts`'s 30s `DEFAULT_TIMEOUT_MS` (bumped from
+ *      25s: that bridge timeout's clock starts at page-navigation, before
+ *      the `load` event, so cold page-load was eating into what looked like
+ *      a 1.9s margin against the script's post-load budget) so a retry
  *      can't itself cause the whole WebView tier to time out and fall through
  *      to the backend-proxy tier. The working happy path (Dr K, 628 segments)
  *      is unaffected: `expand_button_missing` already fired there too without
