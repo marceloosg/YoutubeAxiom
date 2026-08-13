@@ -37,9 +37,18 @@ interface PendingRequest {
  * `fetchTranscript`'s new top tier can request a scrape without needing
  * direct React-tree access -- the bridge is the only coupling.
  *
- * Off-screen via absolute positioning + 1x1 + opacity 0 + pointerEvents none
- * (not `display:none`, which some WebView engines pause script timers for) --
- * keeps the injected MutationObserver / retry timers running normally.
+ * Off-screen via absolute positioning at a large negative `left` + opacity 0 +
+ * pointerEvents none (not `display:none`, which some WebView engines pause
+ * script timers for) -- keeps the injected MutationObserver / retry timers
+ * running normally.
+ *
+ * Real 1280x800 viewport (D19 diagnostic round 2, s195): previously 1x1 --
+ * YouTube's transcript panel is lazy and may not populate content into a
+ * container whose actual rendered viewport is 1px regardless of what the UA
+ * string claims. Pushed off-canvas via `left: -10000` instead of shrinking to
+ * 1x1 so the desktop layout has real room to lay out and lazy-render, while
+ * staying invisible (`opacity: 0`) and non-interactive (`pointerEvents:
+ * 'none'`) -- see `scratchpad/upstream/d19_opus_review_s195.md`.
  *
  * Single-flight: only one scrape is ever in-flight at a time, matching how
  * the app's own callers use `fetchTranscript` (sequential, one video at a
@@ -117,9 +126,9 @@ const styles = StyleSheet.create({
   hidden: {
     position: 'absolute',
     top: 0,
-    left: 0,
-    width: 1,
-    height: 1,
+    left: -10000,
+    width: 1280,
+    height: 800,
     opacity: 0,
   },
 });

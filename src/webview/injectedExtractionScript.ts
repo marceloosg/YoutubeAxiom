@@ -126,6 +126,26 @@ export function extractionTargetUrl(videoId: string): string {
  *      segments on the first observation window returns immediately without
  *      touching the retry path at all.
  *
+ * get_transcript XHR/fetch intercept + login/UA/viewport logging (D19
+ * diagnostic round 2, s195): the DOM-dump diagnostic below shows the panel
+ * container renders but stays empty -- but two confounds were never isolated
+ * from the "logged-out" hypothesis (see
+ * `scratchpad/upstream/d19_opus_review_s195.md`): (1) the extraction WebView
+ * rendered at 1x1 CSS pixels (fixed in `ExtractionWebView.tsx`, this commit --
+ * `webview_viewport` breadcrumb below confirms the fix took effect on-device),
+ * and (2) no visibility into whether YouTube's own
+ * `youtubei/v1/get_transcript` call succeeds, fails with an explicit error, or
+ * is never even made. `installTranscriptFetchIntercept()` wraps both
+ * `window.fetch` and `XMLHttpRequest` (defensively -- whichever YouTube's
+ * client actually uses) and is installed at the very top of the IIFE, before
+ * `run()` is ever called, so it's in place before any transcript-panel
+ * interaction happens. It only observes; it never rewrites the
+ * request/response, so it cannot change the existing scrape control flow or
+ * the `no_segments_scraped` fail path if `get_transcript` is never called at
+ * all. Wrapped in its own top-level try/catch (belt-and-suspenders on top of
+ * the per-call guards) -- hooking fetch/XHR is third-party-page-JS territory
+ * and must never be able to break the main scrape path.
+ *
  * DOM-dump diagnostic (D19, s194): device retest after the hardening above
  * still showed `dom_shape_shift:segment_renderer_missing` on 0/3 (still
  * failing). Backend-probe network logs (a different layer, outside this
@@ -156,6 +176,97 @@ export const EXTRACTION_INJECTED_JS = `
   function fail(reason) {
     post({ type: 'yt_extract_error', reason: String(reason).slice(0, 200) });
   }
+
+  // D19 diagnostic round 2 (s195): observes (never rewrites) any request
+  // whose URL contains "get_transcript" -- YouTube's innerTube endpoint for
+  // fetching transcript data. Installed before run() so the hook is live
+  // before any transcript-panel interaction. Purely observational: if
+  // get_transcript is never called, nothing here fires and the existing
+  // timeout/fail path is unaffected.
+  function reportTranscriptResponseBody(bodyText, status) {
+    crumb('xhr_get_transcript_status=' + status);
+
+    var errMsg = null;
+    try {
+      var parsed = JSON.parse(bodyText);
+      var errObj = parsed && (parsed.error || (parsed.responseContext && parsed.responseContext.error));
+      if (errObj) {
+        errMsg = String((errObj && (errObj.message || errObj.status)) || errObj).slice(0, 200);
+      }
+    } catch (eParse) {
+      // Not JSON, or shape we don't recognize -- fall through to the
+      // status-based ok/error report below rather than losing the signal.
+    }
+
+    if (errMsg) {
+      crumb('xhr_get_transcript_error=' + errMsg);
+    } else if (status >= 200 && status < 300) {
+      crumb('xhr_get_transcript_ok=' + (bodyText ? bodyText.length : 0));
+    } else {
+      crumb('xhr_get_transcript_error=' + ('http_' + status));
+    }
+  }
+
+  function installTranscriptFetchIntercept() {
+    try {
+      if (window.fetch) {
+        var origFetch = window.fetch;
+        window.fetch = function () {
+          var args = arguments;
+          var url = args[0] && args[0].url ? args[0].url : args[0];
+          var isTranscriptCall = typeof url === 'string' && url.indexOf('get_transcript') !== -1;
+          var result = origFetch.apply(this, args);
+          if (isTranscriptCall) {
+            result
+              .then(function (resp) {
+                try {
+                  var status = resp.status;
+                  resp
+                    .clone()
+                    .text()
+                    .then(function (bodyText) {
+                      try {
+                        reportTranscriptResponseBody(bodyText, status);
+                      } catch (e1) {}
+                    })
+                    .catch(function () {});
+                } catch (e2) {}
+              })
+              .catch(function () {});
+          }
+          return result;
+        };
+      }
+    } catch (eFetch) {}
+
+    try {
+      if (window.XMLHttpRequest) {
+        var OrigXHR = window.XMLHttpRequest;
+        var origOpen = OrigXHR.prototype.open;
+        var origSend = OrigXHR.prototype.send;
+        OrigXHR.prototype.open = function (method, url) {
+          try {
+            this.__ytTranscriptCall = typeof url === 'string' && url.indexOf('get_transcript') !== -1;
+          } catch (e3) {}
+          return origOpen.apply(this, arguments);
+        };
+        OrigXHR.prototype.send = function () {
+          try {
+            if (this.__ytTranscriptCall) {
+              this.addEventListener('loadend', function () {
+                try {
+                  reportTranscriptResponseBody(this.responseText, this.status);
+                } catch (e4) {}
+              });
+            }
+          } catch (e5) {}
+          return origSend.apply(this, arguments);
+        };
+      }
+    } catch (eXhr) {}
+  }
+
+  installTranscriptFetchIntercept();
 
   function queryFirst(selectors) {
     for (var i = 0; i < selectors.length; i++) {
@@ -395,7 +506,27 @@ export const EXTRACTION_INJECTED_JS = `
     return segments;
   }
 
+  // D19 diagnostic round 2 (s195): direct in-WebView state logging, each
+  // independently try/catch-guarded so one failing can't block the others.
+  function logRuntimeState() {
+    try {
+      crumb('webview_viewport=' + window.innerWidth + 'x' + window.innerHeight);
+    } catch (eViewport) {}
+
+    try {
+      crumb(
+        'webview_ytcfg_logged_in=' +
+          (typeof ytcfg !== 'undefined' && ytcfg.get ? ytcfg.get('LOGGED_IN') : 'ytcfg_unavailable')
+      );
+    } catch (eYtcfg) {}
+
+    try {
+      crumb('webview_ua=' + navigator.userAgent.slice(0, 80));
+    } catch (eUa) {}
+  }
+
   function run() {
+    logRuntimeState();
     dismissConsentIfPresent();
     // Re-check shortly after in case the consent form was still rendering.
     setTimeout(function () {

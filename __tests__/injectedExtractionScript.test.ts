@@ -155,3 +155,83 @@ describe('EXTRACTION_INJECTED_JS DOM-dump diagnostic (D19, s194)', () => {
     expect((fnBody.match(/catch \(e\d\)/g) || []).length).toBeGreaterThanOrEqual(4);
   });
 });
+
+describe('EXTRACTION_INJECTED_JS get_transcript fetch/XHR intercept (D19 diagnostic round 2, s195)', () => {
+  it('installs the intercept before run() is invoked', () => {
+    const installCallIdx = EXTRACTION_INJECTED_JS.indexOf('installTranscriptFetchIntercept();');
+    const runDefIdx = EXTRACTION_INJECTED_JS.indexOf('function run() {');
+    expect(installCallIdx).toBeGreaterThan(-1);
+    expect(runDefIdx).toBeGreaterThan(-1);
+    expect(installCallIdx).toBeLessThan(runDefIdx);
+  });
+
+  it('hooks both window.fetch and XMLHttpRequest defensively', () => {
+    expect(EXTRACTION_INJECTED_JS).toContain('function installTranscriptFetchIntercept()');
+    expect(EXTRACTION_INJECTED_JS).toContain('window.fetch = function');
+    expect(EXTRACTION_INJECTED_JS).toContain('OrigXHR.prototype.open = function');
+    expect(EXTRACTION_INJECTED_JS).toContain('OrigXHR.prototype.send = function');
+  });
+
+  it('matches on URLs containing get_transcript', () => {
+    const matches = EXTRACTION_INJECTED_JS.match(/indexOf\('get_transcript'\)/g) || [];
+    // Both the fetch path and the XHR open() path check for it.
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('posts a status breadcrumb, then either an error or an ok breadcrumb, never both', () => {
+    expect(EXTRACTION_INJECTED_JS).toContain("crumb('xhr_get_transcript_status=' + status)");
+    expect(EXTRACTION_INJECTED_JS).toContain("crumb('xhr_get_transcript_error=' + errMsg)");
+    expect(EXTRACTION_INJECTED_JS).toContain("crumb('xhr_get_transcript_ok=' + (bodyText ? bodyText.length : 0))");
+  });
+
+  it('does not post the full transcript body, only its length, on success', () => {
+    const okCrumbLine = "crumb('xhr_get_transcript_ok=' + (bodyText ? bodyText.length : 0));";
+    expect(EXTRACTION_INJECTED_JS).toContain(okCrumbLine);
+  });
+
+  it('wraps both interceptor installs in independent try/catch so hooking failures cannot break the scrape flow', () => {
+    const fnMatch = EXTRACTION_INJECTED_JS.match(
+      /function installTranscriptFetchIntercept\(\) \{[\s\S]*?\n  installTranscriptFetchIntercept\(\);/
+    );
+    expect(fnMatch).not.toBeNull();
+    const body = fnMatch ? fnMatch[0] : '';
+    expect(body).toContain('catch (eFetch)');
+    expect(body).toContain('catch (eXhr)');
+  });
+});
+
+describe('EXTRACTION_INJECTED_JS runtime state logging (D19 diagnostic round 2, s195)', () => {
+  it('logs the real rendered viewport at the start of run()', () => {
+    expect(EXTRACTION_INJECTED_JS).toContain(
+      "crumb('webview_viewport=' + window.innerWidth + 'x' + window.innerHeight)"
+    );
+  });
+
+  it('logs ytcfg LOGGED_IN state with a defensive typeof/fallback', () => {
+    expect(EXTRACTION_INJECTED_JS).toContain("typeof ytcfg !== 'undefined' && ytcfg.get");
+    expect(EXTRACTION_INJECTED_JS).toContain("ytcfg.get('LOGGED_IN')");
+    expect(EXTRACTION_INJECTED_JS).toContain("'ytcfg_unavailable'");
+  });
+
+  it('logs the active user agent, truncated to 80 chars', () => {
+    expect(EXTRACTION_INJECTED_JS).toContain("crumb('webview_ua=' + navigator.userAgent.slice(0, 80))");
+  });
+
+  it('calls logRuntimeState() at the top of run(), before any panel interaction', () => {
+    const runFnIdx = EXTRACTION_INJECTED_JS.indexOf('function run() {');
+    const logCallIdx = EXTRACTION_INJECTED_JS.indexOf('logRuntimeState();');
+    const dismissCallIdx = EXTRACTION_INJECTED_JS.lastIndexOf('dismissConsentIfPresent();');
+    expect(runFnIdx).toBeGreaterThan(-1);
+    expect(logCallIdx).toBeGreaterThan(runFnIdx);
+    expect(logCallIdx).toBeLessThan(dismissCallIdx);
+  });
+
+  it('guards each of the three logging breadcrumbs with its own try/catch', () => {
+    const fnMatch = EXTRACTION_INJECTED_JS.match(/function logRuntimeState\(\) \{[\s\S]*?\n  \}/);
+    expect(fnMatch).not.toBeNull();
+    const body = fnMatch ? fnMatch[0] : '';
+    expect(body).toContain('catch (eViewport)');
+    expect(body).toContain('catch (eYtcfg)');
+    expect(body).toContain('catch (eUa)');
+  });
+});
