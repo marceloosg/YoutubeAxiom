@@ -3,6 +3,7 @@
   "version": "1.0.14",
   "main": "index.ts",
   "dependencies": {
+    "@react-native-cookies/cookies": "^6.2.1",
     "crypto-js": "^4.2.0",
     "expo": "~57.0.4",
     "expo-constants": "~57.0.3",
@@ -12,6 +13,7 @@
     "expo-status-bar": "~57.0.0",
     "react": "19.2.3",
     "react-native": "0.86.0",
+    "react-native-webview": "^13.17.0",
     "youtubei.js": "^17.2.0"
   },
   "devDependencies": {

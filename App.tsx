@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -13,8 +13,12 @@ import { StatusBar } from 'expo-status-bar';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import Constants from 'expo-constants';
+import CookieManager from '@react-native-cookies/cookies';
 
 import { parseVideoId } from './src/util/videoId';
+import ExtractionWebView from './src/webview/ExtractionWebView';
+import LoginWebView from './src/webview/LoginWebView';
+import { cookieStringIndicatesLogin } from './src/webview/loginCheck';
 import { resolveAppVersion, resolveCommitSha } from './src/util/appVersion';
 import { fetchTranscript, transcriptToText, TranscriptLine } from './src/scrape/youtubeiClient';
 import { postTranscript } from './src/backend/api';
@@ -102,6 +106,37 @@ export default function App() {
     () => makeInstrumentedFetch(testNetLog.push),
     [testNetLog.push]
   );
+
+  // ---------- Connect YouTube state (s193, D19 Shape A) ----------
+  // `ytConnected` is a best-effort UI signal only -- the extraction WebView
+  // (mounted below, hidden) always attempts a scrape regardless of this flag;
+  // real login state lives in the WebView's own cookie jar, not here. This
+  // just drives whether the "Sign in" button or a "connected" checkmark shows.
+  const [ytConnected, setYtConnected] = useState(false);
+  const [loginModalVisible, setLoginModalVisible] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    CookieManager.get('https://www.youtube.com')
+      .then((cookies) => {
+        if (cancelled) return;
+        const cookieString = Object.keys(cookies)
+          .map((name) => `${name}=${cookies[name]?.value ?? ''}`)
+          .join('; ');
+        if (cookieStringIndicatesLogin(cookieString)) setYtConnected(true);
+      })
+      .catch(() => {
+        // Best-effort -- leave ytConnected false; the Sign-in button stays available.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onLoggedIn = () => {
+    setYtConnected(true);
+    setLoginModalVisible(false);
+  };
 
   const onExtract = async () => {
     setError(null);
@@ -308,7 +343,28 @@ export default function App() {
   return (
     <View style={styles.container}>
       <StatusBar style="auto" />
+      {/* Hidden off-screen extraction WebView (s193, D19 Shape A) -- mounted
+          once, always in the tree. Registers itself as the WebView-scrape
+          handler `fetchTranscript`'s new top tier calls through the bridge. */}
+      <ExtractionWebView />
+      <LoginWebView
+        visible={loginModalVisible}
+        onClose={() => setLoginModalVisible(false)}
+        onLoggedIn={onLoggedIn}
+      />
       <ScrollView contentContainerStyle={styles.scrollBody}>
+        {/* ========== Connect YouTube section (s193, D19 Shape A) ========== */}
+        <View style={styles.connectSection}>
+          <Text style={styles.connectStatus}>
+            {ytConnected ? '✓ YouTube connected' : 'YouTube not connected'}
+          </Text>
+          <Pressable style={styles.connectButton} onPress={() => setLoginModalVisible(true)}>
+            <Text style={styles.connectButtonText}>
+              {ytConnected ? 'Re-sign in' : 'Sign in to YouTube'}
+            </Text>
+          </Pressable>
+        </View>
+
         {/* ========== Extract section (user mode) ========== */}
         <Text style={styles.heading}>YouTube Caption Extractor</Text>
         <Text style={styles.versionSubtitle}>
@@ -546,6 +602,32 @@ const styles = StyleSheet.create({
   scrollBody: {
     paddingHorizontal: 16,
     paddingBottom: 32,
+  },
+  connectSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#f7f9fc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e1e6ee',
+    padding: 10,
+    marginBottom: 16,
+  },
+  connectStatus: {
+    fontSize: 13,
+    color: '#333',
+  },
+  connectButton: {
+    backgroundColor: '#1a73e8',
+    borderRadius: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
+  connectButtonText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
   },
   heading: {
     fontSize: 20,

@@ -12,6 +12,7 @@ import {
   TranscriptLine,
 } from './segmentMap';
 import { fetchTranscriptViaProxy, getBackendProxyConfig } from '../backend/ytTranscriptProxy';
+import { requestWebViewScrape } from '../webview/webviewScrapeBridge';
 
 export type { TranscriptLine };
 export { transcriptToText };
@@ -208,7 +209,21 @@ export async function fetchTranscript(
   onBreadcrumb: Breadcrumb = () => {},
   customFetch?: typeof fetch
 ): Promise<TranscriptResult> {
-  // FIRST TIER (s176-follow): Path K `axiom-yt-transcript` backend proxy.
+  // NEW TOP TIER (s193, D19 Shape A): on-device WebView DOM-scrape of a real
+  // logged-in YouTube session. DBSC binds the login to the device, so every
+  // exported-cookie/API-client approach is structurally rejected -- this tier
+  // stays entirely on-device (react-native-webview is a real browser) and
+  // only the scraped TEXT ever leaves via the existing upload path below.
+  // `requestWebViewScrape` resolves null (no breadcrumb) when no extraction
+  // WebView is mounted yet (e.g. before first sign-in, or under Jest), so
+  // builds/tests that never touch this tier see zero behavior change -- same
+  // silent-skip contract as the backend-proxy tier immediately below.
+  const webviewLines = await requestWebViewScrape(videoId, onBreadcrumb);
+  if (webviewLines) {
+    return { videoId, title: videoId, lines: webviewLines };
+  }
+
+  // SECOND TIER (s176-follow): Path K `axiom-yt-transcript` backend proxy.
   // in-app extraction (below) hits pot-gate + bot-check on non-WEB clients;
   // the backend already has validated cookie-based yt-dlp access (s163).
   // `getBackendProxyConfig` returns null when `extra.ytTranscriptBaseUrl` /
