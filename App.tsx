@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -13,12 +13,10 @@ import { StatusBar } from 'expo-status-bar';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import Constants from 'expo-constants';
-import CookieManager from '@react-native-cookies/cookies';
 
 import { parseVideoId } from './src/util/videoId';
 import ExtractionWebView from './src/webview/ExtractionWebView';
 import LoginWebView from './src/webview/LoginWebView';
-import { cookieStringIndicatesLogin } from './src/webview/loginCheck';
 import { resolveAppVersion, resolveCommitSha } from './src/util/appVersion';
 import { fetchTranscript, transcriptToText, TranscriptLine } from './src/scrape/youtubeiClient';
 import { postTranscript } from './src/backend/api';
@@ -110,28 +108,14 @@ export default function App() {
   // ---------- Connect YouTube state (s193, D19 Shape A) ----------
   // `ytConnected` is a best-effort UI signal only -- the extraction WebView
   // (mounted below, hidden) always attempts a scrape regardless of this flag;
-  // real login state lives in the WebView's own cookie jar, not here. This
-  // just drives whether the "Sign in" button or a "connected" checkmark shows.
+  // real login state lives in the login WebView's own session/cookie jar, not
+  // here. This just drives whether the "Sign in" button or a "connected"
+  // checkmark shows. No mount-time check (would need a native cookie-jar
+  // read -- dropped, see loginDetectScript.ts header) -- starts false each
+  // app launch; re-signing in when the WebView session has actually expired
+  // is the expected/acceptable UX (mock Q2).
   const [ytConnected, setYtConnected] = useState(false);
   const [loginModalVisible, setLoginModalVisible] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    CookieManager.get('https://www.youtube.com')
-      .then((cookies) => {
-        if (cancelled) return;
-        const cookieString = Object.keys(cookies)
-          .map((name) => `${name}=${cookies[name]?.value ?? ''}`)
-          .join('; ');
-        if (cookieStringIndicatesLogin(cookieString)) setYtConnected(true);
-      })
-      .catch(() => {
-        // Best-effort -- leave ytConnected false; the Sign-in button stays available.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const onLoggedIn = () => {
     setYtConnected(true);
