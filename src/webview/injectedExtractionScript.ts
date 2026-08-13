@@ -125,6 +125,23 @@ export function extractionTargetUrl(videoId: string): string {
  *      breaking the scrape (it's a non-fatal crumb), and any run that finds
  *      segments on the first observation window returns immediately without
  *      touching the retry path at all.
+ *
+ * DOM-dump diagnostic (D19, s194): device retest after the hardening above
+ * still showed `dom_shape_shift:segment_renderer_missing` on 0/3 (still
+ * failing). Backend-probe network logs (a different layer, outside this
+ * WebView) show the YouTube session as logged-out and sometimes challenge-
+ * gated -- but that's inferred, not observed inside the WebView's own DOM.
+ * `collectDomDump()` converts the inference into direct evidence, firing
+ * ONLY on the segment_renderer_missing failure path (not the happy path, to
+ * avoid bloating breadcrumb volume on success): whether the transcript panel
+ * container rendered at all (`dom_dump:panel_present`), whether a "Sign in"
+ * prompt or a reload/challenge banner is visible (`dom_dump:signin_detected`,
+ * `dom_dump:reload_challenge_detected`), and a 2000-char single-line-
+ * sanitized `outerHTML` snapshot of whichever container is present
+ * (`dom_dump:html`) for ground truth. Each sub-check is independently
+ * try/catch-guarded so a diagnostic-collection error can never affect the
+ * existing failure path (`fail('no_segments_scraped')` and everything
+ * downstream of it).
  */
 export const EXTRACTION_INJECTED_JS = `
 (function () {
@@ -192,6 +209,67 @@ export const EXTRACTION_INJECTED_JS = `
       'ytd-transcript-search-panel-renderer',
       '[target-id="engagement-panel-searchable-transcript"]',
     ]);
+  }
+
+  function findElementMatching(selectors, re) {
+    var candidates = document.querySelectorAll(selectors);
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      var label = (el.getAttribute && el.getAttribute('aria-label')) || '';
+      var text = el.textContent || '';
+      if (re.test(label) || re.test(text.trim())) return el;
+    }
+    return null;
+  }
+
+  function detectSigninPrompt() {
+    return !!findElementMatching('a, button, tp-yt-paper-button, yt-button-shape, [aria-label]', /sign in/i);
+  }
+
+  function detectReloadChallenge() {
+    if (queryFirst(['ytd-player-error-message-renderer'])) return true;
+    var playerEl = queryFirst(['#player', 'ytd-player', '#movie_player', '.html5-video-player']);
+    var text = playerEl ? playerEl.textContent || '' : '';
+    return /reload|something went wrong/i.test(text);
+  }
+
+  function getDomDumpContainer() {
+    return (
+      queryFirst([
+        'ytd-transcript-segment-list-renderer',
+        'ytd-transcript-search-panel-renderer',
+        '[target-id="engagement-panel-searchable-transcript"]',
+      ]) || queryFirst(['#below'])
+    );
+  }
+
+  // D19 diagnostic (s194): fires ONLY on the segment_renderer_missing failure
+  // path (not the happy path, to avoid bloating breadcrumb volume on
+  // success). Converts the backend-probe inference ("YouTube session looks
+  // logged out") into direct DOM evidence from inside the WebView itself.
+  // Each sub-check is independently try/catch-guarded so a diagnostic-
+  // collection error can never break the existing failure path (the
+  // fail('no_segments_scraped') call downstream must be unaffected).
+  function collectDomDump() {
+    try {
+      crumb('dom_dump:panel_present=' + isTranscriptPanelPresent());
+    } catch (e1) {}
+
+    try {
+      crumb('dom_dump:signin_detected=' + detectSigninPrompt());
+    } catch (e2) {}
+
+    try {
+      crumb('dom_dump:reload_challenge_detected=' + detectReloadChallenge());
+    } catch (e3) {}
+
+    try {
+      var container = getDomDumpContainer();
+      var rawHtml = container ? String(container.outerHTML) : '';
+      var truncated = rawHtml.slice(0, 2000);
+      var sanitized = truncated.replace(/[\\r\\n\\t\\x00-\\x1F\\x7F]/g, ' ');
+      crumb('dom_dump:html=' + sanitized);
+    } catch (e4) {}
   }
 
   function findTranscriptButton() {
@@ -286,7 +364,10 @@ export const EXTRACTION_INJECTED_JS = `
     waitForSegments(SEGMENT_WAIT_ATTEMPTS_MS[attemptIndex], function (nodes) {
       var isLastAttempt = attemptIndex >= SEGMENT_WAIT_ATTEMPTS_MS.length - 1;
       if (nodes.length > 0 || isLastAttempt) {
-        if (nodes.length === 0) crumb('dom_shape_shift:segment_renderer_missing');
+        if (nodes.length === 0) {
+          crumb('dom_shape_shift:segment_renderer_missing');
+          collectDomDump();
+        }
         cb(nodes);
         return;
       }
