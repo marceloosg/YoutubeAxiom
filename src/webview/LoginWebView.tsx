@@ -7,14 +7,17 @@ import { LOGIN_DETECT_INJECTED_JS, parseLoginStatusMessage } from './loginDetect
 const LOGIN_URL =
   'https://accounts.google.com/ServiceLogin?service=youtube&continue=https://www.youtube.com/';
 
-// Desktop UA -- mirrors ExtractionWebView.tsx. Without this the post-login
-// redirect lands on m.youtube.com (mobile layout), whose DOM has no
-// `#avatar-btn` and whose session isn't guaranteed to match the desktop
-// session ExtractionWebView reads via shared cookies (s193 device-test bug:
-// login always looked "not signed in" because of this UA mismatch).
-const DESKTOP_USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+// s194: dropped the desktop-UA spoof here (Marcelo msg 12408 device test --
+// login blocked outright by Google's "this browser or app may not be
+// secure" page, https://support.google.com/accounts/answer/7675428).
+// Google's own doc frames this as a block on embedded/automated browsers in
+// general, not a UA-string check, but a UA that mismatches the WebView's
+// real capabilities is one more signal that can trip it, so this is a cheap
+// thing to rule out first. Detection (loginDetectScript.ts) reads
+// `window.ytcfg.LOGGED_IN`, which YouTube sets on every page load regardless
+// of UA/layout, so dropping this doesn't break login-status detection.
+// ExtractionWebView.tsx keeps its own desktop UA unchanged -- cookies set
+// here are usable there regardless of which UA later reads them.
 
 interface LoginWebViewProps {
   visible: boolean;
@@ -83,7 +86,6 @@ export default function LoginWebView({
       <WebView
         ref={webViewRef}
         source={{ uri: LOGIN_URL }}
-        userAgent={DESKTOP_USER_AGENT}
         injectedJavaScript={LOGIN_DETECT_INJECTED_JS}
         onNavigationStateChange={handleNavStateChange}
         onLoadEnd={handleLoadEnd}
