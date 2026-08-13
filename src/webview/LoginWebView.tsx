@@ -7,6 +7,15 @@ import { LOGIN_DETECT_INJECTED_JS, parseLoginStatusMessage } from './loginDetect
 const LOGIN_URL =
   'https://accounts.google.com/ServiceLogin?service=youtube&continue=https://www.youtube.com/';
 
+// Desktop UA -- mirrors ExtractionWebView.tsx. Without this the post-login
+// redirect lands on m.youtube.com (mobile layout), whose DOM has no
+// `#avatar-btn` and whose session isn't guaranteed to match the desktop
+// session ExtractionWebView reads via shared cookies (s193 device-test bug:
+// login always looked "not signed in" because of this UA mismatch).
+const DESKTOP_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
 interface LoginWebViewProps {
   visible: boolean;
   onClose: () => void;
@@ -16,14 +25,18 @@ interface LoginWebViewProps {
 /**
  * Visible, one-time sign-in WebView (mock §1 "Connect YouTube" flow, s193
  * D19 Shape A). Opens Google's real login flow on-device -- we never read
- * the password field or any form input; login state is detected purely by
- * an injected DOM check for YouTube's account-avatar element (see
- * `loginDetectScript.ts` for why this replaced the cookie-jar signal
- * originally planned). Nothing leaves the device via this component.
+ * the password field or any form input; login state is detected via
+ * `window.ytcfg`'s `LOGGED_IN` flag (OR a secondary avatar-element check) --
+ * see `loginDetectScript.ts` for the full detection writeup, including why
+ * this replaced both the originally-planned cookie-jar signal and the
+ * avatar-only detector that shipped first and failed device-test (mobile UA
+ * meant no desktop avatar DOM ever rendered). Nothing leaves the device via
+ * this component.
  *
  * The Google login flow crosses several pages (form, possible 2FA, then a
  * redirect to youtube.com), so `injectJavaScript` is re-fired on every
- * navigation via `onNavigationStateChange` rather than relying on the
+ * navigation via `onNavigationStateChange` (and again on `onLoadEnd`, in
+ * case a nav-state event is missed) rather than relying solely on the
  * `injectedJavaScript` prop's initial-load-only injection.
  */
 export default function LoginWebView({
@@ -38,6 +51,10 @@ export default function LoginWebView({
     if (!nav.loading) {
       webViewRef.current?.injectJavaScript(LOGIN_DETECT_INJECTED_JS);
     }
+  }, []);
+
+  const handleLoadEnd = useCallback(() => {
+    webViewRef.current?.injectJavaScript(LOGIN_DETECT_INJECTED_JS);
   }, []);
 
   const handleMessage = useCallback(
@@ -66,8 +83,10 @@ export default function LoginWebView({
       <WebView
         ref={webViewRef}
         source={{ uri: LOGIN_URL }}
+        userAgent={DESKTOP_USER_AGENT}
         injectedJavaScript={LOGIN_DETECT_INJECTED_JS}
         onNavigationStateChange={handleNavStateChange}
+        onLoadEnd={handleLoadEnd}
         onMessage={handleMessage}
         javaScriptEnabled
         domStorageEnabled
