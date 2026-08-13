@@ -15,6 +15,8 @@ import * as Sharing from 'expo-sharing';
 import Constants from 'expo-constants';
 
 import { parseVideoId } from './src/util/videoId';
+import ExtractionWebView from './src/webview/ExtractionWebView';
+import LoginWebView from './src/webview/LoginWebView';
 import { resolveAppVersion, resolveCommitSha } from './src/util/appVersion';
 import { fetchTranscript, transcriptToText, TranscriptLine } from './src/scrape/youtubeiClient';
 import { postTranscript } from './src/backend/api';
@@ -102,6 +104,23 @@ export default function App() {
     () => makeInstrumentedFetch(testNetLog.push),
     [testNetLog.push]
   );
+
+  // ---------- Connect YouTube state (s193, D19 Shape A) ----------
+  // `ytConnected` is a best-effort UI signal only -- the extraction WebView
+  // (mounted below, hidden) always attempts a scrape regardless of this flag;
+  // real login state lives in the login WebView's own session/cookie jar, not
+  // here. This just drives whether the "Sign in" button or a "connected"
+  // checkmark shows. No mount-time check (would need a native cookie-jar
+  // read -- dropped, see loginDetectScript.ts header) -- starts false each
+  // app launch; re-signing in when the WebView session has actually expired
+  // is the expected/acceptable UX (mock Q2).
+  const [ytConnected, setYtConnected] = useState(false);
+  const [loginModalVisible, setLoginModalVisible] = useState(false);
+
+  const onLoggedIn = () => {
+    setYtConnected(true);
+    setLoginModalVisible(false);
+  };
 
   const onExtract = async () => {
     setError(null);
@@ -308,7 +327,28 @@ export default function App() {
   return (
     <View style={styles.container}>
       <StatusBar style="auto" />
+      {/* Hidden off-screen extraction WebView (s193, D19 Shape A) -- mounted
+          once, always in the tree. Registers itself as the WebView-scrape
+          handler `fetchTranscript`'s new top tier calls through the bridge. */}
+      <ExtractionWebView />
+      <LoginWebView
+        visible={loginModalVisible}
+        onClose={() => setLoginModalVisible(false)}
+        onLoggedIn={onLoggedIn}
+      />
       <ScrollView contentContainerStyle={styles.scrollBody}>
+        {/* ========== Connect YouTube section (s193, D19 Shape A) ========== */}
+        <View style={styles.connectSection}>
+          <Text style={styles.connectStatus}>
+            {ytConnected ? '✓ YouTube connected' : 'YouTube not connected'}
+          </Text>
+          <Pressable style={styles.connectButton} onPress={() => setLoginModalVisible(true)}>
+            <Text style={styles.connectButtonText}>
+              {ytConnected ? 'Re-sign in' : 'Sign in to YouTube'}
+            </Text>
+          </Pressable>
+        </View>
+
         {/* ========== Extract section (user mode) ========== */}
         <Text style={styles.heading}>YouTube Caption Extractor</Text>
         <Text style={styles.versionSubtitle}>
@@ -546,6 +586,32 @@ const styles = StyleSheet.create({
   scrollBody: {
     paddingHorizontal: 16,
     paddingBottom: 32,
+  },
+  connectSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#f7f9fc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e1e6ee',
+    padding: 10,
+    marginBottom: 16,
+  },
+  connectStatus: {
+    fontSize: 13,
+    color: '#333',
+  },
+  connectButton: {
+    backgroundColor: '#1a73e8',
+    borderRadius: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
+  connectButtonText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
   },
   heading: {
     fontSize: 20,
