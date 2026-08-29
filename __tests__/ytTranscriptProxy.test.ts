@@ -49,7 +49,8 @@ describe('fetchTranscriptViaProxy', () => {
       byteLen: 92,
       srv1Xml: '<transcript><text start="0" dur="1">never gonna give you up</text></transcript>',
     });
-    expect(breadcrumbs).toEqual(['backend_proxy_ok']);
+    expect(breadcrumbs).toHaveLength(1);
+    expect(breadcrumbs[0]).toMatch(/^backend_proxy_ok elapsed_ms=\d+$/);
   });
 
   it('returns null and emits backend_proxy_fail on a 401 (HMAC mismatch) response', async () => {
@@ -64,7 +65,8 @@ describe('fetchTranscriptViaProxy', () => {
     );
 
     expect(result).toBeNull();
-    expect(breadcrumbs).toEqual(['backend_proxy_fail=unauthorized']);
+    expect(breadcrumbs).toHaveLength(1);
+    expect(breadcrumbs[0]).toMatch(/^backend_proxy_fail=unauthorized elapsed_ms=\d+$/);
   });
 
   it('returns null and emits backend_proxy_fail on a network error (fetch rejects)', async () => {
@@ -81,7 +83,98 @@ describe('fetchTranscriptViaProxy', () => {
     );
 
     expect(result).toBeNull();
-    expect(breadcrumbs).toEqual(['backend_proxy_fail=TypeError:Network request failed']);
+    expect(breadcrumbs).toHaveLength(1);
+    expect(breadcrumbs[0]).toMatch(
+      /^backend_proxy_fail=TypeError:Network request failed elapsed_ms=\d+$/
+    );
+  });
+
+  it('aborts via its own timeout (not a platform default) and resolves to null, distinguishing reason=timeout from other errors', async () => {
+    jest.useFakeTimers();
+    try {
+      const fetchMock = jest.fn((_url: string, init?: RequestInit) => {
+        // Never resolves on its own -- only settles when the AbortController
+        // (wired via `init.signal`) fires, mirroring how a real hung
+        // connection behaves against fetch()'s abort contract.
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const err = new Error('The operation was aborted.');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        });
+      }) as unknown as typeof fetch;
+
+      const breadcrumbs: string[] = [];
+      const resultPromise = fetchTranscriptViaProxy(
+        'dQw4w9WgXcQ',
+        { baseUrl: TEST_BASE_URL, secret: TEST_SECRET },
+        fetchMock,
+        (l) => breadcrumbs.push(l)
+      );
+
+      // Advance past PROXY_TIMEOUT_MS (70s) without a real 70s wait.
+      await jest.advanceTimersByTimeAsync(70_001);
+
+      const result = await resultPromise;
+
+      expect(result).toBeNull();
+      expect(breadcrumbs).toHaveLength(1);
+      expect(breadcrumbs[0]).toMatch(/^backend_proxy_fail=timeout elapsed_ms=\d+$/);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not fire our timeout when the backend responds well within PROXY_TIMEOUT_MS', async () => {
+    jest.useFakeTimers();
+    try {
+      const fetchMock = jest.fn((_url: string, init?: RequestInit) => {
+        return new Promise<Response>((resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const err = new Error('The operation was aborted.');
+            err.name = 'AbortError';
+            reject(err);
+          });
+          setTimeout(() => {
+            resolve({
+              status: 200,
+              ok: true,
+              json: async () => ({
+                video_id: 'dQw4w9WgXcQ',
+                source: 'auto',
+                text: 'never gonna give you up',
+                byte_len: 92,
+              }),
+            } as unknown as Response);
+          }, 50);
+        });
+      }) as unknown as typeof fetch;
+
+      const breadcrumbs: string[] = [];
+      const resultPromise = fetchTranscriptViaProxy(
+        'dQw4w9WgXcQ',
+        { baseUrl: TEST_BASE_URL, secret: TEST_SECRET },
+        fetchMock,
+        (l) => breadcrumbs.push(l)
+      );
+
+      await jest.advanceTimersByTimeAsync(50);
+      const result = await resultPromise;
+
+      expect(result).not.toBeNull();
+      expect(breadcrumbs).toHaveLength(1);
+      const match = breadcrumbs[0].match(/^backend_proxy_ok elapsed_ms=(\d+)$/);
+      expect(match).not.toBeNull();
+      const elapsedMs = Number(match?.[1]);
+      // Mocked delay was 50ms -- elapsed should be small, well under the 70s
+      // timeout ceiling (a loose upper bound keeps this robust to fake-timer
+      // scheduling jitter without re-testing the exact 50ms figure).
+      expect(elapsedMs).toBeGreaterThanOrEqual(0);
+      expect(elapsedMs).toBeLessThan(5_000);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('signs the raw JSON body with plain (non-timestamped) HMAC-SHA256, matching the Python reference', () => {
@@ -110,6 +203,7 @@ describe('fetchTranscriptViaProxy', () => {
     );
 
     expect(result).toBeNull();
-    expect(breadcrumbs).toEqual(['backend_proxy_fail=empty_text']);
+    expect(breadcrumbs).toHaveLength(1);
+    expect(breadcrumbs[0]).toMatch(/^backend_proxy_fail=empty_text elapsed_ms=\d+$/);
   });
 });

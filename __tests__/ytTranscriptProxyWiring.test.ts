@@ -74,7 +74,8 @@ describe('fetchTranscript backend-proxy first tier (s176-follow)', () => {
     );
 
     expect(result.lines).toEqual([{ startSec: 0.5, endSec: 3.7, text: 'never gonna give you up' }]);
-    expect(breadcrumbs).toEqual(['backend_proxy_ok']);
+    expect(breadcrumbs).toHaveLength(1);
+    expect(breadcrumbs[0]).toMatch(/^backend_proxy_ok elapsed_ms=\d+$/);
     expect(proxyFetch).toHaveBeenCalledTimes(1);
     const [url] = (proxyFetch as jest.Mock).mock.calls[0];
     expect(url).toBe('http://100.27.246.241:8737/transcript');
@@ -107,8 +108,67 @@ describe('fetchTranscript backend-proxy first tier (s176-follow)', () => {
     const result = await fetchTranscript('vid-401-fallback', (l) => breadcrumbs.push(l), fetchMock);
 
     expect(result.lines).toEqual([{ startSec: 0, endSec: 1, text: 'from web fallback' }]);
-    expect(breadcrumbs).toEqual(
-      expect.arrayContaining(['backend_proxy_fail=unauthorized', 'starting_scrape'])
+    expect(breadcrumbs.some((b) => /^backend_proxy_fail=unauthorized elapsed_ms=\d+$/.test(b))).toBe(
+      true
     );
+    expect(breadcrumbs).toEqual(
+      expect.arrayContaining(['proxy_fallback_entered=unauthorized', 'starting_scrape'])
+    );
+  });
+
+  it('emits proxy_fallback_entered exactly once, right after the proxy-fail breadcrumb, and before the in-app chain starts', async () => {
+    createQueue.push({
+      getInfo: async () => ({
+        basic_info: { title: 'fallback title' },
+        captions: { caption_tracks: [{ base_url: 'https://yt/web?x', language_code: 'en' }] },
+        has_transcript: true,
+        getTranscript: () => {
+          throw new Error('Precondition check failed.');
+        },
+      }),
+    });
+
+    const fetchMock = jest.fn(async (input: RequestInfo) => {
+      const url = typeof input === 'string' ? input : (input as Request).url;
+      if (url.includes('8737/transcript')) {
+        return { status: 401, ok: false, json: async () => ({ error: 'unauthorized' }) } as unknown as Response;
+      }
+      return new Response(
+        '<transcript><text start="0" dur="1">from web fallback</text></transcript>',
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    const breadcrumbs: string[] = [];
+    await fetchTranscript('vid-401-fallback-order', (l) => breadcrumbs.push(l), fetchMock);
+
+    const fallbackEnteredCount = breadcrumbs.filter((b) => b === 'proxy_fallback_entered=unauthorized')
+      .length;
+    expect(fallbackEnteredCount).toBe(1);
+
+    const failIdx = breadcrumbs.findIndex((b) => b.startsWith('backend_proxy_fail=unauthorized'));
+    const fallbackIdx = breadcrumbs.indexOf('proxy_fallback_entered=unauthorized');
+    const startingScrapeIdx = breadcrumbs.indexOf('starting_scrape');
+    expect(failIdx).toBeGreaterThanOrEqual(0);
+    expect(fallbackIdx).toBeGreaterThan(failIdx);
+    expect(startingScrapeIdx).toBeGreaterThan(fallbackIdx);
+  });
+
+  it('does NOT emit proxy_fallback_entered when the proxy tier succeeds', async () => {
+    const proxyFetch = jest.fn(async () => ({
+      status: 200,
+      ok: true,
+      json: async () => ({
+        video_id: 'dQw4w9WgXcQ',
+        source: 'auto',
+        text: 'never gonna give you up',
+        byte_len: 92,
+      }),
+    })) as unknown as typeof fetch;
+
+    const breadcrumbs: string[] = [];
+    await fetchTranscript('dQw4w9WgXcQ', (l) => breadcrumbs.push(l), proxyFetch);
+
+    expect(breadcrumbs.some((b) => b.startsWith('proxy_fallback_entered='))).toBe(false);
   });
 });

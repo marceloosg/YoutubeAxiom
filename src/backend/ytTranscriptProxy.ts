@@ -29,6 +29,20 @@ import { signBody } from '../auth/hmac';
 
 const AUTH_HEADER = 'X-Axiom-Auth';
 
+/**
+ * Explicit client-side ceiling on the proxy fetch. Set slightly above the
+ * backend's own known 60s yt-dlp timeout (`infra/axiom-yt-transcript/
+ * get_transcript.py`, axiom-workspace repo -- server-side, not touched here)
+ * so a genuine slow-but-eventually-successful backend response isn't cut off
+ * prematurely, while still bounding worst-case client wait deterministically
+ * instead of relying on the platform's undocumented default fetch timeout
+ * (previously: plain `fetch()`, no AbortController -- root cause of the
+ * 2026-08-29 `FaDDitH2WtU` diagnosis: the app's connection closed before the
+ * backend's 60s response arrived, and the backend logged a
+ * `ConnectionResetError` trying to write it).
+ */
+const PROXY_TIMEOUT_MS = 70_000;
+
 export interface BackendProxyConfig {
   baseUrl: string;
   secret: string;
@@ -77,10 +91,23 @@ function errorClassName(err: unknown): string {
  * parsed result on success, `null` on any failure -- never throws, so the
  * caller can treat this as a plain fallback-eligible tier.
  *
- * Emits `backend_proxy_ok` on success and `backend_proxy_fail=<reason>` on
- * any failure via `onBreadcrumb` (matches the `<client>_error=` /
- * `<client>_tracks=N` naming convention in youtubeiClient.ts). `onBreadcrumb`
- * defaults to a no-op so this module can be unit-tested without a logger.
+ * The fetch is bounded by an explicit `AbortController` timeout
+ * (`PROXY_TIMEOUT_MS`, see above) instead of relying on the platform's
+ * undocumented default. A timeout-triggered abort is distinguished from any
+ * other thrown error via the `timedOut` flag below.
+ *
+ * Emits `backend_proxy_ok elapsed_ms=<ms>` on success and
+ * `backend_proxy_fail=<reason> elapsed_ms=<ms>` on any failure via
+ * `onBreadcrumb` (matches the `<client>_error=` / `<client>_tracks=N` naming
+ * convention in youtubeiClient.ts). `<reason>` is `timeout` specifically when
+ * our own AbortController fired the abort; any other thrown error keeps
+ * using `errorClassName` as before. `onBreadcrumb` defaults to a no-op so
+ * this module can be unit-tested without a logger.
+ *
+ * The timeout resolves to `null` via the same path as any other failure --
+ * it never propagates an unhandled rejection or abort exception to the
+ * caller (return contract unchanged: `Promise<BackendProxyResult | null>`,
+ * never throws).
  */
 export async function fetchTranscriptViaProxy(
   videoId: string,
@@ -93,6 +120,15 @@ export async function fetchTranscriptViaProxy(
 
   const doFetch = customFetch ?? globalThis.fetch;
 
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, PROXY_TIMEOUT_MS);
+
+  const startedAt = Date.now();
+
   let response: Response;
   try {
     response = await doFetch(`${config.baseUrl}/transcript`, {
@@ -102,33 +138,42 @@ export async function fetchTranscriptViaProxy(
         [AUTH_HEADER]: signature,
       },
       body: jsonBody,
+      signal: controller.signal,
     });
   } catch (err) {
-    onBreadcrumb(`backend_proxy_fail=${errorClassName(err)}`);
+    const elapsedMs = Date.now() - startedAt;
+    const reason = timedOut ? 'timeout' : errorClassName(err);
+    onBreadcrumb(`backend_proxy_fail=${reason} elapsed_ms=${elapsedMs}`);
     return null;
+  } finally {
+    clearTimeout(timeoutHandle);
   }
 
   let payload: Record<string, unknown> = {};
   try {
     payload = await response.json();
   } catch (err) {
-    onBreadcrumb(`backend_proxy_fail=bad_json:${errorClassName(err)}`);
+    const elapsedMs = Date.now() - startedAt;
+    onBreadcrumb(`backend_proxy_fail=bad_json:${errorClassName(err)} elapsed_ms=${elapsedMs}`);
     return null;
   }
 
   if (response.status !== 200) {
+    const elapsedMs = Date.now() - startedAt;
     const detail = typeof payload.error === 'string' ? payload.error : `http_${response.status}`;
-    onBreadcrumb(`backend_proxy_fail=${detail}`);
+    onBreadcrumb(`backend_proxy_fail=${detail} elapsed_ms=${elapsedMs}`);
     return null;
   }
 
   const text = typeof payload.text === 'string' ? payload.text : '';
   if (!text) {
-    onBreadcrumb('backend_proxy_fail=empty_text');
+    const elapsedMs = Date.now() - startedAt;
+    onBreadcrumb(`backend_proxy_fail=empty_text elapsed_ms=${elapsedMs}`);
     return null;
   }
 
-  onBreadcrumb('backend_proxy_ok');
+  const elapsedMs = Date.now() - startedAt;
+  onBreadcrumb(`backend_proxy_ok elapsed_ms=${elapsedMs}`);
   return {
     source: typeof payload.source === 'string' ? payload.source : 'unknown',
     text,
