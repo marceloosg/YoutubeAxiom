@@ -219,11 +219,29 @@ export async function fetchTranscript(
   // throws.
   const proxyConfig = getBackendProxyConfig();
   if (proxyConfig) {
+    // Capture the reason from `backend_proxy_fail=<reason> elapsed_ms=<ms>`
+    // (or the no-suffix `backend_proxy_fail=empty_lines` set directly below)
+    // so a single failure emits exactly one `proxy_fallback_entered=<reason>`
+    // breadcrumb right before the in-app chain starts -- ties "proxy
+    // attempted -> proxy failed (elapsed + reason) -> fallback entered"
+    // together in one device-log read, without firing on every invocation
+    // (the tier is skipped silently, no breadcrumb at all, when
+    // `getBackendProxyConfig` returns null above).
+    let proxyFailReason: string | undefined;
+    const proxyBreadcrumb: Breadcrumb = (label) => {
+      onBreadcrumb(label);
+      if (label.startsWith('backend_proxy_fail=')) {
+        proxyFailReason = label
+          .slice('backend_proxy_fail='.length)
+          .replace(/\s+elapsed_ms=\d+$/, '');
+      }
+    };
+
     const proxyResult = await fetchTranscriptViaProxy(
       videoId,
       proxyConfig,
       customFetch,
-      onBreadcrumb
+      proxyBreadcrumb
     );
     if (proxyResult) {
       const lines = proxyResult.srv1Xml
@@ -232,7 +250,10 @@ export async function fetchTranscript(
       if (lines.length > 0) {
         return { videoId, title: videoId, lines };
       }
-      onBreadcrumb('backend_proxy_fail=empty_lines');
+      proxyBreadcrumb('backend_proxy_fail=empty_lines');
+    }
+    if (proxyFailReason) {
+      onBreadcrumb(`proxy_fallback_entered=${proxyFailReason}`);
     }
   }
 
