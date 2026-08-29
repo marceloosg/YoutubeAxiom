@@ -30,18 +30,25 @@ import { signBody } from '../auth/hmac';
 const AUTH_HEADER = 'X-Axiom-Auth';
 
 /**
- * Explicit client-side ceiling on the proxy fetch. Set slightly above the
- * backend's own known 60s yt-dlp timeout (`infra/axiom-yt-transcript/
- * get_transcript.py`, axiom-workspace repo -- server-side, not touched here)
- * so a genuine slow-but-eventually-successful backend response isn't cut off
- * prematurely, while still bounding worst-case client wait deterministically
- * instead of relying on the platform's undocumented default fetch timeout
- * (previously: plain `fetch()`, no AbortController -- root cause of the
- * 2026-08-29 `FaDDitH2WtU` diagnosis: the app's connection closed before the
- * backend's 60s response arrived, and the backend logged a
- * `ConnectionResetError` trying to write it).
+ * Explicit client-side ceiling on the proxy fetch. Set with a real buffer
+ * above the backend's own worst-case request chain
+ * (`infra/axiom-yt-transcript/get_transcript.py`, axiom-workspace repo --
+ * server-side, not touched here): preflight (~1.5-3s) + yt-dlp metadata
+ * fetch (120s ceiling as of axiom-workspace PR #492, bumped from 60s after
+ * live testing on the mobile-proxied connection showed genuine latency
+ * variance -- one identical fetch completing in 4.6s, another running right
+ * up to the old 60s ceiling) + the proxied caption-fetch leg (35s, a
+ * separate curl call over the same SOCKS5 tunnel) -- roughly 158s worst
+ * case total. The buffer here exists so a genuine slow-but-eventually-
+ * successful backend response is never cut off prematurely, while still
+ * bounding worst-case client wait deterministically instead of relying on
+ * the platform's undocumented default fetch timeout (previously: plain
+ * `fetch()`, no AbortController -- root cause of the 2026-08-29
+ * `FaDDitH2WtU` diagnosis: the app's connection closed before the backend's
+ * 60s response arrived, and the backend logged a `ConnectionResetError`
+ * trying to write it).
  */
-const PROXY_TIMEOUT_MS = 70_000;
+const PROXY_TIMEOUT_MS = 165_000;
 
 export interface BackendProxyConfig {
   baseUrl: string;
