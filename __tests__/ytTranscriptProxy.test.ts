@@ -113,8 +113,8 @@ describe('fetchTranscriptViaProxy', () => {
         (l) => breadcrumbs.push(l)
       );
 
-      // Advance past PROXY_TIMEOUT_MS (70s) without a real 70s wait.
-      await jest.advanceTimersByTimeAsync(70_001);
+      // Advance past PROXY_TIMEOUT_MS (165s) without a real 165s wait.
+      await jest.advanceTimersByTimeAsync(165_001);
 
       const result = await resultPromise;
 
@@ -167,7 +167,7 @@ describe('fetchTranscriptViaProxy', () => {
       const match = breadcrumbs[0].match(/^backend_proxy_ok elapsed_ms=(\d+)$/);
       expect(match).not.toBeNull();
       const elapsedMs = Number(match?.[1]);
-      // Mocked delay was 50ms -- elapsed should be small, well under the 70s
+      // Mocked delay was 50ms -- elapsed should be small, well under the 165s
       // timeout ceiling (a loose upper bound keeps this robust to fake-timer
       // scheduling jitter without re-testing the exact 50ms figure).
       expect(elapsedMs).toBeGreaterThanOrEqual(0);
